@@ -10,8 +10,8 @@ import sys
 
 sys.path.insert(0, ".")
 
-from minisgl.config import SamplingParams, ServerArgs
-from minisgl.engine.engine import Engine, ModelArgs
+from minisgl.config import ModelArgs, SamplingParams, ServerArgs
+from minisgl.engine.engine import Engine
 from minisgl.scheduler.scheduler import Scheduler
 
 MODEL_PATH = os.path.expanduser("~/hfhub/models/facebook/opt-125m")

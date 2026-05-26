@@ -34,7 +34,9 @@ def _request(path: str, body: dict = None) -> dict:
     url = f"http://{HOST}:{PORT}{path}"
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(
-        url, data=data, method="GET" if body is None else "POST"
+        url,
+        data=data,
+        method="GET" if body is None else "POST",
     )
     req.add_header("Content-Type", "application/json")
     with urllib.request.urlopen(req, timeout=120) as resp:

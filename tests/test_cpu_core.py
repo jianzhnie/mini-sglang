@@ -24,7 +24,7 @@ class TestRMSNorm(unittest.TestCase):
         self.assertIsNone(res)  # no residual when None
         # Variance after norm should be ~1
         self.assertTrue(
-            torch.allclose(out.float().pow(2).mean(-1), torch.ones(2, 10), atol=0.1)
+            torch.allclose(out.float().pow(2).mean(-1), torch.ones(2, 10), atol=0.1),
         )
 
     def test_fused_residual(self):
