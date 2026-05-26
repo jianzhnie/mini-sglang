@@ -1,10 +1,11 @@
 """Prefill manager: schedules new requests for initial prompt processing."""
 
+__all__ = ["PrefillManager"]
 from collections import deque
-from typing import Deque, List, Optional, Tuple
+from typing import Deque
 
 from minisgl.config import ServerArgs
-from minisgl.engine.kvcache.pool import BaseCacheHandle, KVCachePool
+from minisgl.engine.kvcache.pool import KVCachePool
 from minisgl.engine.kvcache.radix import RadixCacheManager
 from minisgl.scheduler.batch import Batch, Req, SequenceStatus
 
@@ -12,7 +13,9 @@ from minisgl.scheduler.batch import Batch, Req, SequenceStatus
 class PrefillManager:
     """Manages the prefill queue and token budget."""
 
-    def __init__(self, args: ServerArgs, pool: KVCachePool, radix_cache: RadixCacheManager):
+    def __init__(
+        self, args: ServerArgs, pool: KVCachePool, radix_cache: RadixCacheManager
+    ):
         self.max_running_req = args.max_running_req
         self.max_seq_len = args.max_seq_len
         self.page_size = args.page_size
@@ -21,12 +24,12 @@ class PrefillManager:
         self.pool = pool
         self.radix_cache = radix_cache
         self.pending: Deque[Req] = deque()
-        self.running: List[Req] = []
+        self.running: list[Req] = []
 
     def add_request(self, req: Req) -> None:
         self.pending.append(req)
 
-    def schedule_prefill(self) -> Optional[Batch]:
+    def schedule_prefill(self) -> Batch | None:
         """Select requests from pending queue, allocate KV cache, build prefill batch.
 
         Returns None if no requests can be scheduled.
@@ -34,7 +37,7 @@ class PrefillManager:
         if not self.pending:
             return None
 
-        scheduled: List[Req] = []
+        scheduled: list[Req] = []
         total_tokens = 0
 
         while self.pending and len(scheduled) < self.max_running_req:

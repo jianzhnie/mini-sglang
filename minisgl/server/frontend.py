@@ -1,15 +1,21 @@
 """FastAPI server frontend with OpenAI-compatible API endpoints."""
 
-import asyncio
+__all__ = [
+    "app",
+    "ChatMessage",
+    "ChatCompletionRequest",
+    "CompletionRequest",
+    "FrontendManager",
+    "init_frontend",
+]
 import json
 import queue
 import threading
 import time
-from typing import Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from minisgl.config import SamplingParams, ServerArgs
 from minisgl.scheduler.scheduler import Scheduler
@@ -25,7 +31,7 @@ class ChatMessage(BaseModel):
 
 class ChatCompletionRequest(BaseModel):
     model: str = "default"
-    messages: List[ChatMessage]
+    messages: list[ChatMessage]
     temperature: float = 0.0
     top_p: float = 1.0
     top_k: int = -1
@@ -52,11 +58,13 @@ class FrontendManager:
         self.args = server_args
         self.scheduler = scheduler
         self.tokenizer = tokenizer_worker
-        self._results: Dict[int, queue.Queue] = {}
+        self._results: dict[int, queue.Queue] = {}
         self._lock = threading.Lock()
         self._running = True
 
-    def submit_request(self, input_ids: List[int], sampling_params: SamplingParams) -> int:
+    def submit_request(
+        self, input_ids: list[int], sampling_params: SamplingParams
+    ) -> int:
         """Submit a tokenized request and return its UID."""
         with self._lock:
             uid = self.scheduler.add_request(input_ids, sampling_params)
@@ -99,10 +107,12 @@ class FrontendManager:
 
 
 # Global frontend manager set after initialization
-_frontend: Optional[FrontendManager] = None
+_frontend: FrontendManager | None = None
 
 
-def init_frontend(server_args: ServerArgs, scheduler: Scheduler, tokenizer_worker) -> FrontendManager:
+def init_frontend(
+    server_args: ServerArgs, scheduler: Scheduler, tokenizer_worker
+) -> FrontendManager:
     global _frontend
     _frontend = FrontendManager(server_args, scheduler, tokenizer_worker)
     _frontend.start()
@@ -154,11 +164,13 @@ async def chat_completions(request: ChatCompletionRequest):
             "id": f"chatcmpl-{uid}",
             "object": "chat.completion",
             "model": request.model,
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": text},
-                "finish_reason": "stop",
-            }],
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": text},
+                    "finish_reason": "stop",
+                }
+            ],
         }
 
 
@@ -173,11 +185,13 @@ def _stream_chat_response(uid: int, result_queue: queue.Queue, model: str):
                 "id": f"chatcmpl-{uid}",
                 "object": "chat.completion.chunk",
                 "model": model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {"content": text},
-                    "finish_reason": "stop" if finished else None,
-                }],
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": text},
+                        "finish_reason": "stop" if finished else None,
+                    }
+                ],
             }
             yield f"data: {json.dumps(chunk, ensure_ascii=True)}\n\n"
 
@@ -240,11 +254,13 @@ def _stream_completion_response(uid: int, result_queue: queue.Queue, model: str)
                 "id": f"cmpl-{uid}",
                 "object": "text_completion",
                 "model": model,
-                "choices": [{
-                    "index": 0,
-                    "text": text,
-                    "finish_reason": "stop" if finished else None,
-                }],
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": text,
+                        "finish_reason": "stop" if finished else None,
+                    }
+                ],
             }
             yield f"data: {json.dumps(chunk, ensure_ascii=True)}\n\n"
 

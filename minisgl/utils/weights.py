@@ -1,7 +1,8 @@
 """Weight loading utilities for HuggingFace models."""
 
+__all__ = ["load_hf_weights", "shard_tensor", "load_weights_parallel"]
 import os
-from typing import Dict, Iterator, Tuple
+from collections.abc import Iterator
 
 import torch
 from safetensors.torch import load_file as safe_load
@@ -9,8 +10,9 @@ from safetensors.torch import load_file as safe_load
 from minisgl.utils.device import get_device, get_tp_rank, get_tp_size
 
 
-def _iter_hf_files(model_path: str) -> Iterator[Tuple[str, str]]:
+def _iter_hf_files(model_path: str) -> Iterator[tuple[str, str]]:
     """Yield (file_path, file_type) pairs: 'safetensors' or 'bin'."""
+
     for fname in sorted(os.listdir(model_path)):
         if fname.endswith(".safetensors"):
             yield os.path.join(model_path, fname), "safetensors"
@@ -18,14 +20,15 @@ def _iter_hf_files(model_path: str) -> Iterator[Tuple[str, str]]:
             yield os.path.join(model_path, fname), "bin"
 
 
-def load_hf_weights(model_path: str) -> Dict[str, torch.Tensor]:
+def load_hf_weights(model_path: str) -> dict[str, torch.Tensor]:
     """Load all HF weights from a directory into a single state dict."""
-    state_dict: Dict[str, torch.Tensor] = {}
+    state_dict: dict[str, torch.Tensor] = {}
     index_file = os.path.join(model_path, "model.safetensors.index.json")
 
     if os.path.exists(index_file):
         import json
-        with open(index_file, "r") as f:
+
+        with open(index_file) as f:
             index = json.load(f)
         for fname in sorted(set(index["weight_map"].values())):
             file_path = os.path.join(model_path, fname)
@@ -35,12 +38,16 @@ def load_hf_weights(model_path: str) -> Dict[str, torch.Tensor]:
             if ftype == "safetensors":
                 state_dict.update(safe_load(file_path))
             elif ftype == "bin":
-                state_dict.update(torch.load(file_path, map_location="cpu", weights_only=True))
+                state_dict.update(
+                    torch.load(file_path, map_location="cpu", weights_only=True)
+                )
 
     return state_dict
 
 
-def shard_tensor(tensor: torch.Tensor, dim: int, rank: int, world_size: int) -> torch.Tensor:
+def shard_tensor(
+    tensor: torch.Tensor, dim: int, rank: int, world_size: int
+) -> torch.Tensor:
     """Shard a tensor along the given dimension."""
     chunk_size = tensor.shape[dim] // world_size
     start = rank * chunk_size
@@ -49,7 +56,7 @@ def shard_tensor(tensor: torch.Tensor, dim: int, rank: int, world_size: int) -> 
 
 def load_weights_parallel(
     model: torch.nn.Module,
-    state_dict: Dict[str, torch.Tensor],
+    state_dict: dict[str, torch.Tensor],
     tp_rank: int = 0,
     tp_size: int = 1,
     remap_fn=None,
@@ -96,13 +103,17 @@ def load_weights_parallel(
             weight = shard_tensor(weight, dim=0, rank=tp_rank, world_size=tp_size)
         # Handle shape mismatch (e.g., embed_positions truncation)
         elif param.shape != weight.shape and param.dim() >= 2:
-            weight = weight[:param.shape[0]] if weight.shape[0] > param.shape[0] else weight
+            weight = (
+                weight[: param.shape[0]] if weight.shape[0] > param.shape[0] else weight
+            )
 
         if param.shape == weight.shape:
             param.data.copy_(weight.to(device=device, dtype=param.dtype))
             loaded += 1
         elif param.dim() >= 2 and weight.shape[0] >= param.shape[0]:
-            param.data.copy_(weight[:param.shape[0]].to(device=device, dtype=param.dtype))
+            param.data.copy_(
+                weight[: param.shape[0]].to(device=device, dtype=param.dtype)
+            )
             loaded += 1
 
     return loaded

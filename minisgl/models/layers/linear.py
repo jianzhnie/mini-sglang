@@ -1,16 +1,18 @@
 """Tensor parallel linear layers."""
 
+__all__ = ["ColumnParallelLinear", "RowParallelLinear"]
 import math
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from minisgl.utils.device import get_tp_rank, get_tp_size, is_distributed
+from minisgl.utils.device import get_tp_size, is_distributed
 
 
 class ColumnParallelLinear(nn.Module):
     """Linear layer with output dimension sharded across TP ranks.
+
 
     Forward computes partial output; gather combines all parts.
     """
@@ -27,9 +29,7 @@ class ColumnParallelLinear(nn.Module):
         self.out_features_per_rank = out_features // tp_size
         self.gather_output = gather_output
 
-        self.weight = nn.Parameter(
-            torch.empty(self.out_features_per_rank, in_features)
-        )
+        self.weight = nn.Parameter(torch.empty(self.out_features_per_rank, in_features))
         self.weight.is_column_parallel = True
         self._init_weights()
         if bias:
@@ -44,6 +44,7 @@ class ColumnParallelLinear(nn.Module):
         out = F.linear(x, self.weight, self.bias)
         if self.gather_output and is_distributed():
             from minisgl.engine.distributed.pynccl import all_gather
+
             out = all_gather(out, dim=-1)
         return out
 
@@ -66,9 +67,7 @@ class RowParallelLinear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
 
-        self.weight = nn.Parameter(
-            torch.empty(out_features, self.in_features_per_rank)
-        )
+        self.weight = nn.Parameter(torch.empty(out_features, self.in_features_per_rank))
         self.weight.is_row_parallel = True
         self._init_weights()
         if bias:
@@ -83,6 +82,7 @@ class RowParallelLinear(nn.Module):
         out = F.linear(x, self.weight)
         if is_distributed():
             from minisgl.engine.distributed.pynccl import all_reduce
+
             out = all_reduce(out)
         if self.bias is not None:
             out = out + self.bias

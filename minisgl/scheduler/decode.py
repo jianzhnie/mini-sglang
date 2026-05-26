@@ -1,11 +1,10 @@
 """Decode manager: schedules running requests for token-by-token generation."""
 
-from typing import List, Optional
-
+__all__ = ["DecodeManager"]
 import torch
 
 from minisgl.config import ServerArgs
-from minisgl.engine.kvcache.pool import BaseCacheHandle, KVCachePool
+from minisgl.engine.kvcache.pool import KVCachePool
 from minisgl.engine.kvcache.radix import RadixCacheManager
 from minisgl.scheduler.batch import Batch, Req
 
@@ -13,18 +12,21 @@ from minisgl.scheduler.batch import Batch, Req
 class DecodeManager:
     """Manages the decode queue of actively generating requests.
 
+
     Naive implementation: re-processes all tokens each step
     (no KV cache for simplicity and correctness).
     """
 
-    def __init__(self, args: ServerArgs, pool: KVCachePool, radix_cache: RadixCacheManager):
+    def __init__(
+        self, args: ServerArgs, pool: KVCachePool, radix_cache: RadixCacheManager
+    ):
         self.max_running_req = args.max_running_req
         self.page_size = args.page_size
         self.pool = pool
         self.radix_cache = radix_cache
         self.naive_mode = True  # Skip KV cache for now
 
-    def schedule_decode(self, running: List[Req]) -> Optional[Batch]:
+    def schedule_decode(self, running: list[Req]) -> Batch | None:
         if not running:
             return None
 

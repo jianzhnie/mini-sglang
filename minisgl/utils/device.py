@@ -1,14 +1,22 @@
 """Device and distributed initialization utilities."""
 
+__all__ = [
+    "get_tp_rank",
+    "get_tp_size",
+    "get_device",
+    "set_device",
+    "init_distributed",
+    "is_distributed",
+    "barrier",
+]
 import os
-from typing import Optional
 
 import torch
 import torch.distributed as dist
 
 _TP_RANK: int = 0
 _TP_SIZE: int = 1
-_DEVICE: Optional[torch.device] = None
+_DEVICE: torch.device | None = None
 
 
 def get_tp_rank() -> int:

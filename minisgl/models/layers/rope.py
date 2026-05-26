@@ -1,10 +1,12 @@
 """Rotary Position Embedding (RoPE)."""
 
+__all__ = ["RotaryEmbedding", "apply_rotary_emb"]
 import torch
 
 
 class RotaryEmbedding:
     """Manages precomputed cos/sin tables for rotary position embeddings.
+
 
     Supports dynamic sequence length extension.
     """
@@ -29,21 +31,24 @@ class RotaryEmbedding:
     def _build_cache(self, seq_len: int) -> None:
         """Build cos/sin cache tables up to seq_len."""
         inv_freq = 1.0 / (
-            self.rope_theta ** (
-                torch.arange(0, self.head_dim, 2, dtype=torch.float32) / self.head_dim
-            )
+            self.rope_theta
+            ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32) / self.head_dim)
         )
         positions = torch.arange(seq_len, dtype=torch.float32)
         freqs = torch.outer(positions, inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
-        self._cos_table = emb.cos().unsqueeze(0).unsqueeze(0)  # (1, 1, seq_len, head_dim)
+        self._cos_table = (
+            emb.cos().unsqueeze(0).unsqueeze(0)
+        )  # (1, 1, seq_len, head_dim)
         self._sin_table = emb.sin().unsqueeze(0).unsqueeze(0)
 
     def _ensure_cache(self, seq_len: int) -> None:
         if self._cos_table is None or seq_len > self._cos_table.shape[2]:
             self._build_cache(max(seq_len, self.max_position_embeddings))
 
-    def __call__(self, q: torch.Tensor, k: torch.Tensor, positions: torch.Tensor) -> None:
+    def __call__(
+        self, q: torch.Tensor, k: torch.Tensor, positions: torch.Tensor
+    ) -> None:
         """Apply RoPE to q and k in-place.
 
         Args:
@@ -83,11 +88,11 @@ def apply_rotary_emb(
 
     # Rotate half the dimensions
     head_dim = q.shape[-1]
-    q1, q2 = q_rot[..., :head_dim // 2], q_rot[..., head_dim // 2:]
-    k1, k2 = k_rot[..., :head_dim // 2], k_rot[..., head_dim // 2:]
+    q1, q2 = q_rot[..., : head_dim // 2], q_rot[..., head_dim // 2 :]
+    k1, k2 = k_rot[..., : head_dim // 2], k_rot[..., head_dim // 2 :]
 
-    cos_half = cos[..., :head_dim // 2]
-    sin_half = sin[..., :head_dim // 2]
+    cos_half = cos[..., : head_dim // 2]
+    sin_half = sin[..., : head_dim // 2]
 
     q_rotated_1 = q1 * cos_half - q2 * sin_half
     q_rotated_2 = q2 * cos_half + q1 * sin_half

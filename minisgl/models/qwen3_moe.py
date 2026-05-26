@@ -6,21 +6,19 @@ Qwen3MoEForCausalLM:
 - FusedMoE: Triton kernel for efficient expert computation
 """
 
-from dataclasses import dataclass
-from typing import List, Optional
-
+__all__ = [
+    "Qwen3MoEMLP",
+    "Qwen3MoEDecoderLayer",
+    "Qwen3MoEModel",
+    "Qwen3MoEForCausalLM",
+]
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from minisgl.models.layers.linear import ColumnParallelLinear, RowParallelLinear
 from minisgl.models.layers.rms_norm import RMSNorm
-from minisgl.models.qwen3 import (
-    Qwen3Attention,
-    Qwen3DecoderLayer,
-    Qwen3Model,
-    Qwen3ForCausalLM as _Qwen3ForCausalLM,
-)
+from minisgl.models.qwen3 import Qwen3Attention
 from minisgl.utils.device import get_tp_size
 
 
@@ -53,9 +51,15 @@ class Qwen3MoEMLP(nn.Module):
         self.router = nn.Linear(hidden_size, num_experts, bias=False)
 
         # Shared experts
-        self.shared_gate = ColumnParallelLinear(hidden_size, moe_intermediate_size, bias=False)
-        self.shared_up = ColumnParallelLinear(hidden_size, moe_intermediate_size, bias=False)
-        self.shared_down = RowParallelLinear(moe_intermediate_size, hidden_size, bias=False)
+        self.shared_gate = ColumnParallelLinear(
+            hidden_size, moe_intermediate_size, bias=False
+        )
+        self.shared_up = ColumnParallelLinear(
+            hidden_size, moe_intermediate_size, bias=False
+        )
+        self.shared_down = RowParallelLinear(
+            moe_intermediate_size, hidden_size, bias=False
+        )
 
         # Routed experts: gate_proj, up_proj, down_proj per expert
         self.num_local_experts = num_experts // tp_size
@@ -109,8 +113,12 @@ class Qwen3MoEMLP(nn.Module):
                 continue
 
             tokens_for_expert = x[mask]  # (num_tokens, hidden)
-            weight_idx = (selected_experts[mask] == expert_idx).nonzero(as_tuple=True)[1]
-            weights = router_weights[mask][torch.arange(len(weight_idx)), weight_idx].unsqueeze(-1)
+            weight_idx = (selected_experts[mask] == expert_idx).nonzero(as_tuple=True)[
+                1
+            ]
+            weights = router_weights[mask][
+                torch.arange(len(weight_idx)), weight_idx
+            ].unsqueeze(-1)
 
             # Expert computation: SiLU(gate) * up, then down
             gate = F.linear(tokens_for_expert, self.expert_gate[expert_idx])
@@ -131,31 +139,39 @@ class Qwen3MoEDecoderLayer(nn.Module):
         from minisgl.models.qwen3 import Qwen3MLP
 
         self.self_attn = Qwen3Attention(
-            config.hidden_size, config.num_attention_heads, config.num_kv_heads,
-            config.head_dim, config.max_position_embeddings, config.rope_theta,
+            config.hidden_size,
+            config.num_attention_heads,
+            config.num_kv_heads,
+            config.head_dim,
+            config.max_position_embeddings,
+            config.rope_theta,
             config.rms_norm_eps,
         )
 
         if is_moe_layer:
             self.mlp = Qwen3MoEMLP(
-                config.hidden_size, config.intermediate_size,
-                config.moe_intermediate_size, config.num_experts,
+                config.hidden_size,
+                config.intermediate_size,
+                config.moe_intermediate_size,
+                config.num_experts,
                 config.num_experts_per_tok,
             )
         else:
             self.mlp = Qwen3MLP(config.hidden_size, config.intermediate_size)
 
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-        k_cache: Optional[torch.Tensor] = None,
-        v_cache: Optional[torch.Tensor] = None,
-        write_loc: Optional[torch.Tensor] = None,
+        residual: torch.Tensor | None = None,
+        k_cache: torch.Tensor | None = None,
+        v_cache: torch.Tensor | None = None,
+        write_loc: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if residual is None:
             residual = hidden_states
@@ -180,25 +196,29 @@ class Qwen3MoEModel(nn.Module):
         from minisgl.models.layers.embedding import VocabParallelEmbedding
 
         self.config = config
-        self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size, config.hidden_size
+        )
 
         decoder_sparse_step = config.decoder_sparse_step or 1
-        self.layers = nn.ModuleList([
-            Qwen3MoEDecoderLayer(
-                config,
-                is_moe_layer=(i % decoder_sparse_step == decoder_sparse_step - 1),
-            )
-            for i in range(config.num_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                Qwen3MoEDecoderLayer(
+                    config,
+                    is_moe_layer=(i % decoder_sparse_step == decoder_sparse_step - 1),
+                )
+                for i in range(config.num_layers)
+            ]
+        )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        k_cache: Optional[torch.Tensor] = None,
-        v_cache: Optional[torch.Tensor] = None,
-        write_loc: Optional[torch.Tensor] = None,
+        k_cache: torch.Tensor | None = None,
+        v_cache: torch.Tensor | None = None,
+        write_loc: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -207,8 +227,12 @@ class Qwen3MoEModel(nn.Module):
             layer_k_cache = k_cache[i] if k_cache is not None else None
             layer_v_cache = v_cache[i] if v_cache is not None else None
             hidden_states = layer(
-                hidden_states, positions, residual,
-                layer_k_cache, layer_v_cache, write_loc,
+                hidden_states,
+                positions,
+                residual,
+                layer_k_cache,
+                layer_v_cache,
+                write_loc,
             )
 
         hidden_states, _ = self.norm(hidden_states)
@@ -221,16 +245,18 @@ class Qwen3MoEForCausalLM(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
         self.model = Qwen3MoEModel(config)
-        self.lm_head = ColumnParallelLinear(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = ColumnParallelLinear(
+            config.hidden_size, config.vocab_size, bias=False
+        )
         self.config = config
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        k_cache: Optional[torch.Tensor] = None,
-        v_cache: Optional[torch.Tensor] = None,
-        write_loc: Optional[torch.Tensor] = None,
+        k_cache: torch.Tensor | None = None,
+        v_cache: torch.Tensor | None = None,
+        write_loc: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, k_cache, v_cache, write_loc)
         return self.lm_head(hidden_states)

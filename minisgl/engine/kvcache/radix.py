@@ -5,8 +5,8 @@ arrives, the tree is traversed to find the longest common prefix,
 avoiding redundant KV cache computation.
 """
 
-from collections import defaultdict
-from typing import Dict, List, Optional
+__all__ = ["RadixNode", "RadixCacheManager"]
+from typing import Optional
 
 from minisgl.engine.kvcache.pool import BaseCacheHandle, KVCachePool
 
@@ -18,9 +18,9 @@ class RadixNode:
 
     def __init__(self, token: int = -1):
         self.token = token
-        self.children: Dict[int, "RadixNode"] = {}
+        self.children: dict[int, "RadixNode"] = {}
         self.ref_count: int = 0
-        self.cache_handle: Optional[BaseCacheHandle] = None
+        self.cache_handle: BaseCacheHandle | None = None
         self.parent: Optional["RadixNode"] = None
 
 
@@ -33,7 +33,7 @@ class RadixCacheManager:
         self.root = RadixNode()
         self.root.ref_count = 1  # Root always referenced
 
-    def match_prefix(self, input_ids: List[int]) -> int:
+    def match_prefix(self, input_ids: list[int]) -> int:
         """Return the number of tokens that match a cached prefix."""
         node = self.root
         matched = 0
@@ -45,7 +45,7 @@ class RadixCacheManager:
                 break
         return matched - (matched % self.page_size)
 
-    def insert(self, input_ids: List[int], handle: BaseCacheHandle) -> None:
+    def insert(self, input_ids: list[int], handle: BaseCacheHandle) -> None:
         """Insert a token sequence into the radix tree."""
         node = self.root
         for token_id in input_ids:
@@ -57,12 +57,12 @@ class RadixCacheManager:
             node.ref_count += 1
         node.cache_handle = handle
 
-    def evict(self, num_pages: int) -> List[BaseCacheHandle]:
+    def evict(self, num_pages: int) -> list[BaseCacheHandle]:
         """Evict least recently used nodes to free pages."""
-        evicted: List[BaseCacheHandle] = []
+        evicted: list[BaseCacheHandle] = []
         pages_freed = 0
 
-        def _collect_evictable(node: RadixNode) -> List[RadixNode]:
+        def _collect_evictable(node: RadixNode) -> list[RadixNode]:
             candidates = []
             if node.ref_count == 0 and node.cache_handle is not None:
                 candidates.append(node)
@@ -85,7 +85,7 @@ class RadixCacheManager:
 
         return evicted
 
-    def remove(self, input_ids: List[int]) -> None:
+    def remove(self, input_ids: list[int]) -> None:
         """Decrement reference counts when a request finishes."""
         node = self.root
         for token_id in input_ids:

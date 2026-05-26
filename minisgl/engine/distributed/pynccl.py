@@ -4,6 +4,7 @@ Uses torch.distributed as the backend for collective operations
 (all_reduce, all_gather, broadcast) used in tensor parallelism.
 """
 
+__all__ = ["all_reduce", "all_gather", "broadcast", "barrier"]
 import torch
 import torch.distributed as dist
 

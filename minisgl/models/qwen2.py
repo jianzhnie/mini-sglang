@@ -6,8 +6,13 @@ Qwen2ForCausalLM architecture:
 - Standard attention with RoPE
 """
 
-from typing import List, Optional
-
+__all__ = [
+    "Qwen2Attention",
+    "Qwen2MLP",
+    "Qwen2DecoderLayer",
+    "Qwen2Model",
+    "Qwen2ForCausalLM",
+]
 import torch
 import torch.nn as nn
 
@@ -21,8 +26,15 @@ from minisgl.utils.device import get_tp_rank, get_tp_size
 class Qwen2Attention(nn.Module):
     """Multi-head attention for Qwen2 with RoPE."""
 
-    def __init__(self, hidden_size: int, num_heads: int, num_kv_heads: int,
-                 head_dim: int, max_position_embeddings: int, rope_theta: float) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        max_position_embeddings: int,
+        rope_theta: float,
+    ) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -34,8 +46,12 @@ class Qwen2Attention(nn.Module):
         self.num_local_kv_heads = num_kv_heads // self.tp_size
 
         self.q_proj = ColumnParallelLinear(hidden_size, num_heads * head_dim, bias=True)
-        self.k_proj = ColumnParallelLinear(hidden_size, num_kv_heads * head_dim, bias=True)
-        self.v_proj = ColumnParallelLinear(hidden_size, num_kv_heads * head_dim, bias=True)
+        self.k_proj = ColumnParallelLinear(
+            hidden_size, num_kv_heads * head_dim, bias=True
+        )
+        self.v_proj = ColumnParallelLinear(
+            hidden_size, num_kv_heads * head_dim, bias=True
+        )
         self.o_proj = RowParallelLinear(num_heads * head_dim, hidden_size, bias=False)
 
         self.rotary_emb = RotaryEmbedding(head_dim, max_position_embeddings, rope_theta)
@@ -44,9 +60,9 @@ class Qwen2Attention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
-        k_cache: Optional[torch.Tensor] = None,
-        v_cache: Optional[torch.Tensor] = None,
-        write_loc: Optional[torch.Tensor] = None,
+        k_cache: torch.Tensor | None = None,
+        v_cache: torch.Tensor | None = None,
+        write_loc: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if hidden_states.dim() == 2:
             hidden_states = hidden_states.unsqueeze(0)
@@ -78,7 +94,6 @@ class Qwen2Attention(nn.Module):
 
         # Write KV to cache if provided
         if k_cache is not None and write_loc is not None:
-            page_size = k_cache.shape[1]
             num_kv_heads = k_cache.shape[2]
             head_dim = k_cache.shape[3]
             flat_k = k_cache.view(-1, num_kv_heads, head_dim)
@@ -91,6 +106,7 @@ class Qwen2Attention(nn.Module):
 
         # Use flash attention via SDPA for now (backend will be made pluggable)
         from minisgl.models.attention.backend import AttentionBackend
+
         output = AttentionBackend.forward(q, k, v, k_cache, v_cache, write_loc)
         output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
 
@@ -105,26 +121,38 @@ class Qwen2MLP(nn.Module):
 
     def __init__(self, hidden_size: int, intermediate_size: int) -> None:
         super().__init__()
-        self.gate_proj = ColumnParallelLinear(hidden_size, intermediate_size, bias=False)
+        self.gate_proj = ColumnParallelLinear(
+            hidden_size, intermediate_size, bias=False
+        )
         self.up_proj = ColumnParallelLinear(hidden_size, intermediate_size, bias=False)
         self.down_proj = RowParallelLinear(intermediate_size, hidden_size, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.down_proj(
-            nn.functional.silu(self.gate_proj(x)) * self.up_proj(x)
-        )
+        return self.down_proj(nn.functional.silu(self.gate_proj(x)) * self.up_proj(x))
 
 
 class Qwen2DecoderLayer(nn.Module):
     """Single transformer decoder layer: RMSNorm → Attention → RMSNorm → MLP."""
 
-    def __init__(self, hidden_size: int, num_heads: int, num_kv_heads: int,
-                 head_dim: int, intermediate_size: int, max_position_embeddings: int,
-                 rope_theta: float, rms_norm_eps: float) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        intermediate_size: int,
+        max_position_embeddings: int,
+        rope_theta: float,
+        rms_norm_eps: float,
+    ) -> None:
         super().__init__()
         self.self_attn = Qwen2Attention(
-            hidden_size, num_heads, num_kv_heads, head_dim,
-            max_position_embeddings, rope_theta,
+            hidden_size,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            max_position_embeddings,
+            rope_theta,
         )
         self.mlp = Qwen2MLP(hidden_size, intermediate_size)
         self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
@@ -134,10 +162,10 @@ class Qwen2DecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-        k_cache: Optional[torch.Tensor] = None,
-        v_cache: Optional[torch.Tensor] = None,
-        write_loc: Optional[torch.Tensor] = None,
+        residual: torch.Tensor | None = None,
+        k_cache: torch.Tensor | None = None,
+        v_cache: torch.Tensor | None = None,
+        write_loc: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Attention with residual
         if residual is None:
@@ -162,24 +190,33 @@ class Qwen2Model(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
         self.config = config
-        self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList([
-            Qwen2DecoderLayer(
-                config.hidden_size, config.num_attention_heads, config.num_kv_heads,
-                config.head_dim, config.intermediate_size, config.max_position_embeddings,
-                config.rope_theta, config.rms_norm_eps,
-            )
-            for _ in range(config.num_layers)
-        ])
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size, config.hidden_size
+        )
+        self.layers = nn.ModuleList(
+            [
+                Qwen2DecoderLayer(
+                    config.hidden_size,
+                    config.num_attention_heads,
+                    config.num_kv_heads,
+                    config.head_dim,
+                    config.intermediate_size,
+                    config.max_position_embeddings,
+                    config.rope_theta,
+                    config.rms_norm_eps,
+                )
+                for _ in range(config.num_layers)
+            ]
+        )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        k_cache: Optional[torch.Tensor] = None,
-        v_cache: Optional[torch.Tensor] = None,
-        write_loc: Optional[torch.Tensor] = None,
+        k_cache: torch.Tensor | None = None,
+        v_cache: torch.Tensor | None = None,
+        write_loc: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -188,8 +225,12 @@ class Qwen2Model(nn.Module):
             layer_k_cache = k_cache[i] if k_cache is not None else None
             layer_v_cache = v_cache[i] if v_cache is not None else None
             hidden_states = layer(
-                hidden_states, positions, residual,
-                layer_k_cache, layer_v_cache, write_loc,
+                hidden_states,
+                positions,
+                residual,
+                layer_k_cache,
+                layer_v_cache,
+                write_loc,
             )
 
         hidden_states, _ = self.norm(hidden_states)
@@ -202,9 +243,10 @@ class Qwen2ForCausalLM(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
         self.model = Qwen2Model(config)
-        tp_size = get_tp_size()
         self.lm_head = ColumnParallelLinear(
-            config.hidden_size, config.vocab_size, bias=False,
+            config.hidden_size,
+            config.vocab_size,
+            bias=False,
         )
         self.config = config
 
@@ -212,9 +254,9 @@ class Qwen2ForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        k_cache: Optional[torch.Tensor] = None,
-        v_cache: Optional[torch.Tensor] = None,
-        write_loc: Optional[torch.Tensor] = None,
+        k_cache: torch.Tensor | None = None,
+        v_cache: torch.Tensor | None = None,
+        write_loc: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, k_cache, v_cache, write_loc)
         return self.lm_head(hidden_states)
@@ -224,7 +266,6 @@ class Qwen2ForCausalLM(nn.Module):
         if self.config.tie_word_embeddings:
             # Find embed_tokens weight
             embed_key = "model.embed_tokens.weight"
-            lm_head_key = "lm_head.weight"
             if embed_key in state_dict:
                 # For TP, lm_head weight is the vocabulary-parallel version of embed_tokens
                 if get_tp_size() > 1:

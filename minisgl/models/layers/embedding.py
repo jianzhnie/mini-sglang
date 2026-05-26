@@ -1,5 +1,6 @@
 """Vocabulary parallel embedding."""
 
+__all__ = ["VocabParallelEmbedding"]
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -31,10 +32,13 @@ class VocabParallelEmbedding(nn.Module):
         out-of-range tokens return zero.
         """
         mask = (input_ids >= self.vocab_start) & (input_ids < self.vocab_end)
-        safe_ids = (input_ids - self.vocab_start).clamp(0, self.num_embeddings_per_rank - 1)
+        safe_ids = (input_ids - self.vocab_start).clamp(
+            0, self.num_embeddings_per_rank - 1
+        )
         out = F.embedding(safe_ids, self.weight)
         out = out * mask.unsqueeze(-1).to(out.dtype)
         if is_distributed():
             from minisgl.engine.distributed.pynccl import all_reduce
+
             out = all_reduce(out)
         return out

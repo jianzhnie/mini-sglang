@@ -1,14 +1,14 @@
 """Logging utilities."""
 
+__all__ = ["setup_logger", "logger"]
 import logging
 import sys
-from typing import Optional
 
 
 def setup_logger(
     name: str = "minisgl",
     level: int = logging.INFO,
-    log_file: Optional[str] = None,
+    log_file: str | None = None,
 ) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(level)

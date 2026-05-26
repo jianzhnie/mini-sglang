@@ -1,11 +1,13 @@
 """RMSNorm with fused residual add."""
 
+__all__ = ["RMSNorm"]
 import torch
 import torch.nn as nn
 
 
 class RMSNorm(nn.Module):
     """Root Mean Square Layer Normalization with fused residual add.
+
 
     When residual is provided: out, new_residual = rms_norm(x + residual)
     When residual is None: out, new_residual = rms_norm(x)

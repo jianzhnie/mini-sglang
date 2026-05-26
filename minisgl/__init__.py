@@ -5,51 +5,76 @@ Usage:
     python -m minisgl --model-path Qwen/Qwen2-0.5B-Instruct --shell
 """
 
+__all__ = ["parse_args", "run_server", "run_shell", "main"]
 import argparse
-import multiprocessing
-import sys
-from typing import Optional
 
 from minisgl.config import ModelArgs, ServerArgs
 from minisgl.engine.engine import Engine
 from minisgl.engine.llm import LLM
 from minisgl.models.tokenizer.worker import TokenizerWorker
 from minisgl.scheduler.scheduler import Scheduler
-from minisgl.utils.device import init_distributed
 from minisgl.utils.logger import setup_logger
 
 
 def parse_args() -> ServerArgs:
-    parser = argparse.ArgumentParser(description="Mini-SGLang: Lightweight LLM Inference")
-    parser.add_argument("--model-path", type=str, required=True, help="Path to HF model")
+    parser = argparse.ArgumentParser(
+        description="Mini-SGLang: Lightweight LLM Inference"
+    )
+    parser.add_argument(
+        "--model-path", type=str, required=True, help="Path to HF model"
+    )
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallelism size")
-    parser.add_argument("--memory-ratio", type=float, default=0.9,
-                        help="Ratio of GPU memory for KV cache")
+    parser.add_argument(
+        "--tp-size", type=int, default=1, help="Tensor parallelism size"
+    )
+    parser.add_argument(
+        "--memory-ratio",
+        type=float,
+        default=0.9,
+        help="Ratio of GPU memory for KV cache",
+    )
     parser.add_argument("--max-running-req", type=int, default=256)
     parser.add_argument("--max-seq-len", type=int, default=8192)
-    parser.add_argument("--page-size", type=int, default=16,
-                        help="KV cache page size in tokens")
-    parser.add_argument("--cuda-graph-bs", type=int, default=None,
-                        help="Max batch size for CUDA graph capture")
-    parser.add_argument("--attention-backend", type=str, default="fa",
-                        choices=["fa", "fi", "fa,fi"],
-                        help="Attention backend: fa (FlashAttention), fi (FlashInfer)")
-    parser.add_argument("--dtype", type=str, default="auto",
-                        choices=["auto", "float16", "bfloat16", "float32"])
-    parser.add_argument("--trust-remote-code", action="store_true",
-                        help="Trust remote code for HF models")
-    parser.add_argument("--shell", action="store_true",
-                        help="Interactive CLI shell mode")
+    parser.add_argument(
+        "--page-size", type=int, default=16, help="KV cache page size in tokens"
+    )
+    parser.add_argument(
+        "--cuda-graph-bs",
+        type=int,
+        default=None,
+        help="Max batch size for CUDA graph capture",
+    )
+    parser.add_argument(
+        "--attention-backend",
+        type=str,
+        default="fa",
+        choices=["fa", "fi", "fa,fi"],
+        help="Attention backend: fa (FlashAttention), fi (FlashInfer)",
+    )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default="auto",
+        choices=["auto", "float16", "bfloat16", "float32"],
+    )
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Trust remote code for HF models",
+    )
+    parser.add_argument(
+        "--shell", action="store_true", help="Interactive CLI shell mode"
+    )
     parser.add_argument("--log-level", type=str, default="INFO")
     return ServerArgs(**vars(parser.parse_args()))
 
 
 def run_server(args: ServerArgs) -> None:
     """Launch the HTTP server with scheduler in background thread."""
-    from minisgl.server.frontend import app, init_frontend
     import uvicorn
+
+    from minisgl.server.frontend import app, init_frontend
 
     setup_logger(level=getattr(__import__("logging"), args.log_level))
 
@@ -82,7 +107,6 @@ def run_shell(args: ServerArgs) -> None:
     print(f"Model: {args.model_path}")
     print("Type 'quit' or 'exit' to stop.\n")
 
-    history = []
     while True:
         try:
             user_input = input(">>> ").strip()

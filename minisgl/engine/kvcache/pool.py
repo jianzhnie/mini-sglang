@@ -1,7 +1,7 @@
 """KV Cache pool and cache handle base classes."""
 
+__all__ = ["BaseCacheHandle", "KVCachePool"]
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 import torch
 
@@ -9,7 +9,8 @@ import torch
 @dataclass
 class BaseCacheHandle:
     """Tracks allocated KV cache pages for a request."""
-    page_ids: List[int] = field(default_factory=list)
+
+    page_ids: list[int] = field(default_factory=list)
     cached_len: int = 0
 
     def num_pages(self) -> int:
@@ -41,19 +42,24 @@ class KVCachePool:
 
         # Allocate one large tensor: (2, num_layers, num_pages, page_size, num_heads, head_dim)
         self.buffer = torch.empty(
-            2, num_layers, num_pages, page_size, num_kv_heads, head_dim,
-            dtype=dtype, device=device,
+            2,
+            num_layers,
+            num_pages,
+            page_size,
+            num_kv_heads,
+            head_dim,
+            dtype=dtype,
+            device=device,
         )
 
-        self.free_pages: List[int] = list(range(num_pages))
+        self.free_pages: list[int] = list(range(num_pages))
         self.used_pages: set = set()
 
     def alloc(self, num_pages: int) -> BaseCacheHandle:
         """Allocate num_pages from the free pool."""
         if len(self.free_pages) < num_pages:
             raise RuntimeError(
-                f"KV cache out of memory: requested {num_pages} pages, "
-                f"only {len(self.free_pages)} free"
+                f"KV cache out of memory: requested {num_pages} pages, only {len(self.free_pages)} free"
             )
 
         handle = BaseCacheHandle()

@@ -1,7 +1,6 @@
 """Sampling strategies: greedy, top-k, top-p (nucleus), temperature."""
 
-from typing import List
-
+__all__ = ["Sampler"]
 import torch
 import torch.nn.functional as F
 
@@ -66,5 +65,7 @@ def _apply_top_p(logits: torch.Tensor, p: float) -> torch.Tensor:
     sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
     sorted_indices_to_remove[:, 0] = False
 
-    indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+    indices_to_remove = sorted_indices_to_remove.scatter(
+        1, sorted_indices, sorted_indices_to_remove
+    )
     return logits.masked_fill(indices_to_remove, float("-inf"))

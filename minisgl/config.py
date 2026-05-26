@@ -1,14 +1,15 @@
 """Configuration dataclasses for mini-sglang."""
 
+__all__ = ["SamplingParams", "ServerArgs", "CacheArgs", "ModelArgs"]
 import json
 import os
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
 class SamplingParams:
     """Sampling parameters for text generation."""
+
     temperature: float = 0.0
     top_k: int = -1
     top_p: float = 1.0
@@ -19,6 +20,7 @@ class SamplingParams:
 @dataclass
 class ServerArgs:
     """Server and engine configuration parsed from CLI / env."""
+
     model_path: str = ""
     host: str = "127.0.0.1"
     port: int = 8000
@@ -27,7 +29,7 @@ class ServerArgs:
     max_running_req: int = 256
     max_seq_len: int = 8192
     page_size: int = 16
-    cuda_graph_bs: Optional[int] = None
+    cuda_graph_bs: int | None = None
     attention_backend: str = "fa"
     dtype: str = "auto"
     trust_remote_code: bool = False
@@ -41,6 +43,7 @@ class ServerArgs:
 @dataclass
 class CacheArgs:
     """KV cache configuration derived from ServerArgs and GPU memory."""
+
     page_size: int = 16
     num_pages: int = 0
     max_seq_len: int = 8192
@@ -60,6 +63,7 @@ class CacheArgs:
 @dataclass
 class ModelArgs:
     """Model architecture parameters loaded from HuggingFace config.json."""
+
     hidden_size: int = 0
     num_layers: int = 0
     num_attention_heads: int = 0
@@ -71,8 +75,8 @@ class ModelArgs:
     rms_norm_eps: float = 1e-6
     tie_word_embeddings: bool = False
     use_sliding_window: bool = False
-    sliding_window: Optional[int] = None
-    rope_scaling: Optional[dict] = None
+    sliding_window: int | None = None
+    rope_scaling: dict | None = None
     # MoE
     num_experts: int = 0
     num_experts_per_tok: int = 0
@@ -86,7 +90,7 @@ class ModelArgs:
     @classmethod
     def from_pretrained(cls, model_path: str) -> "ModelArgs":
         config_file = os.path.join(model_path, "config.json")
-        with open(config_file, "r") as f:
+        with open(config_file) as f:
             cfg = json.load(f)
 
         num_kv_heads = cfg.get("num_key_value_heads", cfg.get("num_attention_heads", 0))

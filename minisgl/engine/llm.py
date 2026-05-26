@@ -6,8 +6,7 @@ Usage:
     output = llm.generate(["Hello, world!", "What is AI?"])
 """
 
-from typing import List, Optional, Union
-
+__all__ = ["LLM"]
 from minisgl.config import ModelArgs, SamplingParams, ServerArgs
 from minisgl.engine.engine import Engine
 from minisgl.models.tokenizer.worker import TokenizerWorker
@@ -51,12 +50,12 @@ class LLM:
 
     def generate(
         self,
-        prompts: Union[str, List[str]],
+        prompts: str | list[str],
         temperature: float = 0.0,
         top_p: float = 1.0,
         top_k: int = -1,
         max_tokens: int = 1024,
-    ) -> Union[str, List[str]]:
+    ) -> str | list[str]:
         """Generate text from prompts.
 
         Args:
@@ -79,7 +78,7 @@ class LLM:
             max_tokens=max_tokens,
         )
 
-        results: List[str] = []
+        results: list[str] = []
         uid_to_idx = {}
 
         # Submit all requests
@@ -105,11 +104,11 @@ class LLM:
 
     def chat(
         self,
-        messages: Union[List[dict], List[List[dict]]],
+        messages: list[dict] | list[list[dict]],
         temperature: float = 0.0,
         top_p: float = 1.0,
         max_tokens: int = 1024,
-    ) -> Union[str, List[str]]:
+    ) -> str | list[str]:
         """Chat completion interface.
 
         Args:
@@ -121,13 +120,12 @@ class LLM:
         Returns:
             Assistant response text or list of response texts.
         """
-        single_input = isinstance(messages, list) and messages and isinstance(messages[0], dict)
+        single_input = (
+            isinstance(messages, list) and messages and isinstance(messages[0], dict)
+        )
         msg_list = [messages] if single_input else messages
 
-        prompts = [
-            self.tokenizer.apply_chat_template(msgs)
-            for msgs in msg_list
-        ]
+        prompts = [self.tokenizer.apply_chat_template(msgs) for msgs in msg_list]
 
         return self.generate(
             prompts,

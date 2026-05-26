@@ -1,7 +1,7 @@
 """Tokenizer worker process: handles token encode/decode via ZMQ."""
 
+__all__ = ["TokenizeMsg", "DetokenizeMsg", "UserMsg", "TokenizerWorker"]
 from dataclasses import dataclass
-from typing import List, Optional
 
 from minisgl.utils.logger import logger
 
@@ -22,8 +22,8 @@ class DetokenizeMsg:
 @dataclass
 class UserMsg:
     uid: int
-    input_ids: List[int]
-    sampling_params: Optional[dict] = None
+    input_ids: list[int]
+    sampling_params: dict | None = None
 
 
 class TokenizerWorker:
@@ -44,7 +44,7 @@ class TokenizerWorker:
         )
         self.eos_token_id = self.tokenizer.eos_token_id or 151643
 
-    def encode(self, text: str) -> List[int]:
+    def encode(self, text: str) -> list[int]:
         """Encode text to token IDs."""
         return self.tokenizer.encode(text, add_special_tokens=True)
 
@@ -55,7 +55,9 @@ class TokenizerWorker:
             skip_special_tokens=skip_special_tokens,
         )
 
-    def apply_chat_template(self, messages: List[dict], add_generation_prompt: bool = True) -> str:
+    def apply_chat_template(
+        self, messages: list[dict], add_generation_prompt: bool = True
+    ) -> str:
         """Apply the model's chat template, with fallback for models without one."""
         if hasattr(self.tokenizer, "chat_template") and self.tokenizer.chat_template:
             return self.tokenizer.apply_chat_template(
@@ -63,18 +65,10 @@ class TokenizerWorker:
                 tokenize=False,
                 add_generation_prompt=add_generation_prompt,
             )
-        # Fallback: simple concatenation for models without chat template (e.g., OPT)
-        parts = []
+        # Fallback: for base models, use raw content as prompt
+        parts: list[str] = []
         for msg in messages:
-            role = msg.get("role", "user")
             content = msg.get("content", "")
-            if role == "user":
-                parts.append(f"User: {content}")
-            elif role == "assistant":
-                parts.append(f"Assistant: {content}")
-            else:
+            if content:
                 parts.append(content)
-        prompt = "\n".join(parts)
-        if add_generation_prompt:
-            prompt += "\nAssistant:"
-        return prompt
+        return "\n\n".join(parts)

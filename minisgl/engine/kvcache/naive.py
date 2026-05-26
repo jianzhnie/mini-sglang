@@ -1,7 +1,7 @@
 """Naive LRU-based KV cache manager (no prefix sharing)."""
 
+__all__ = ["NaiveCacheManager"]
 from collections import OrderedDict
-from typing import List
 
 from minisgl.engine.kvcache.pool import BaseCacheHandle, KVCachePool
 
@@ -17,7 +17,9 @@ class NaiveCacheManager:
         """Allocate pages for a request, evicting LRU if needed."""
         while self.pool.free_count() < num_pages:
             if not self.lru:
-                raise RuntimeError(f"Cannot allocate {num_pages} pages: all pages in use")
+                raise RuntimeError(
+                    f"Cannot allocate {num_pages} pages: all pages in use"
+                )
             _, old_handle = self.lru.popitem(last=False)
             self.pool.free(old_handle)
 

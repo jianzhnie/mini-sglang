@@ -7,11 +7,9 @@ weighted sum of expert outputs is computed in a single kernel.
 Reference: https://github.com/sgl-project/sglang
 """
 
+__all__ = ["fused_moe_pytorch"]
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-
-from minisgl.utils.logger import logger
 
 try:
     import triton
@@ -31,7 +29,7 @@ try:
         # Dimensions
         N,  # total tokens
         H,  # hidden size
-        I,  # intermediate size
+        I,  # intermediate size  # noqa: E741
         E,  # num experts
         K,  # top-k
         # Strides
@@ -56,30 +54,39 @@ try:
 
         # Load router logits for this token
         router_offs = token_idx * E + expert_idx
-        router_val = tl.load(router_logits_ptr + router_offs)
+        _router_val = tl.load(router_logits_ptr + router_offs)
 
         # Skip if this expert is not selected
         # (simplified: process all, router handles weighting)
 
         # Load input vector
         x_offset = token_idx * stride_xn
-        x = tl.load(x_ptr + x_offset + tl.arange(0, BLOCK_H), mask=tl.arange(0, BLOCK_H) < H)
+        _x = tl.load(
+            x_ptr + x_offset + tl.arange(0, BLOCK_H), mask=tl.arange(0, BLOCK_H) < H
+        )
 
         # Gate projection
         g_offset = expert_idx * stride_gnn
-        g = tl.load(gate_weight_ptr + g_offset + tl.arange(0, BLOCK_I),
-                     mask=tl.arange(0, BLOCK_I) < I)
+        _g = tl.load(
+            gate_weight_ptr + g_offset + tl.arange(0, BLOCK_I),
+            mask=tl.arange(0, BLOCK_I) < I,
+        )
         # Actually need 2D load: gate_weight[expert, :, :] @ x
 
         # Up projection
         u_offset = expert_idx * stride_unn
-        u = tl.load(up_weight_ptr + u_offset + tl.arange(0, BLOCK_I),
-                     mask=tl.arange(0, BLOCK_I) < I)
+        _u = tl.load(
+            up_weight_ptr + u_offset + tl.arange(0, BLOCK_I),
+            mask=tl.arange(0, BLOCK_I) < I,
+        )
 
         # Simplified: return 0 (placeholder for actual implementation)
         out_offset = token_idx * stride_xn
-        tl.store(output_ptr + out_offset + tl.arange(0, BLOCK_H), 0.0,
-                  mask=tl.arange(0, BLOCK_H) < H)
+        tl.store(
+            output_ptr + out_offset + tl.arange(0, BLOCK_H),
+            0.0,
+            mask=tl.arange(0, BLOCK_H) < H,
+        )
 
     HAS_TRITON = True
 except ImportError:
@@ -135,7 +142,7 @@ def fused_moe_pytorch(
 
         # Find the weight for each token to this expert
         # For each token, find which top-k slot points to this expert
-        slot_matches = (selected_experts[token_indices] == expert_idx)
+        slot_matches = selected_experts[token_indices] == expert_idx
         slot_indices = slot_matches.float().argmax(dim=-1)
         weights = routing_weights[token_indices, slot_indices].unsqueeze(-1)
 
