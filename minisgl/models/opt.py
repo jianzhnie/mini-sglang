@@ -20,7 +20,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from minisgl.models.layers.embedding import VocabParallelEmbedding
-from minisgl.models.layers.linear import ColumnParallelLinear, RowParallelLinear
+from minisgl.models.layers.linear import (
+    ColumnParallelLinear,
+    RowParallelLinear,
+)
 from minisgl.utils.device import get_tp_size
 
 
@@ -28,7 +31,10 @@ class LayerNorm(nn.Module):
     """Standard Layer Normalization."""
 
     def __init__(
-        self, normalized_shape: int, eps: float = 1e-5, elementwise_affine: bool = True
+        self,
+        normalized_shape: int,
+        eps: float = 1e-5,
+        elementwise_affine: bool = True,
     ):
         super().__init__()
         self.normalized_shape = (normalized_shape,)

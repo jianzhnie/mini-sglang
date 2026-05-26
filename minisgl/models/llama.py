@@ -17,7 +17,10 @@ import torch
 import torch.nn as nn
 
 from minisgl.models.layers.embedding import VocabParallelEmbedding
-from minisgl.models.layers.linear import ColumnParallelLinear, RowParallelLinear
+from minisgl.models.layers.linear import (
+    ColumnParallelLinear,
+    RowParallelLinear,
+)
 from minisgl.models.layers.rms_norm import RMSNorm
 from minisgl.models.layers.rope import RotaryEmbedding
 from minisgl.utils.device import get_tp_size

@@ -37,7 +37,10 @@ def parse_args() -> ServerArgs:
     parser.add_argument("--max-running-req", type=int, default=256)
     parser.add_argument("--max-seq-len", type=int, default=8192)
     parser.add_argument(
-        "--page-size", type=int, default=16, help="KV cache page size in tokens"
+        "--page-size",
+        type=int,
+        default=16,
+        help="KV cache page size in tokens",
     )
     parser.add_argument(
         "--cuda-graph-bs",

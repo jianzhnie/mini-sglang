@@ -14,7 +14,10 @@ class PrefillManager:
     """Manages the prefill queue and token budget."""
 
     def __init__(
-        self, args: ServerArgs, pool: KVCachePool, radix_cache: RadixCacheManager
+        self,
+        args: ServerArgs,
+        pool: KVCachePool,
+        radix_cache: RadixCacheManager,
     ):
         self.max_running_req = args.max_running_req
         self.max_seq_len = args.max_seq_len

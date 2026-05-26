@@ -62,7 +62,8 @@ try:
         # Load input vector
         x_offset = token_idx * stride_xn
         _x = tl.load(
-            x_ptr + x_offset + tl.arange(0, BLOCK_H), mask=tl.arange(0, BLOCK_H) < H
+            x_ptr + x_offset + tl.arange(0, BLOCK_H),
+            mask=tl.arange(0, BLOCK_H) < H,
         )
 
         # Gate projection

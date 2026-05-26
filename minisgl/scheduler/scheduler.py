@@ -67,7 +67,7 @@ class Scheduler:
         if prefill_batch is not None:
             logits = self.engine.forward(prefill_batch)
             next_tokens = self.engine.sample(logits, prefill_batch)
-            for req, token_id in zip(prefill_batch.reqs, next_tokens):
+            for req, token_id in zip(prefill_batch.reqs, next_tokens, strict=False):
                 req.append_token(token_id)
                 results.append((req.uid, token_id, False))
 
@@ -79,17 +79,14 @@ class Scheduler:
                 logits = self.engine.forward(decode_batch)
                 next_tokens = self.engine.sample(logits, decode_batch)
 
-                for req, token_id in zip(decode_batch.reqs, next_tokens):
+                for req, token_id in zip(decode_batch.reqs, next_tokens, strict=False):
                     req.append_token(token_id)
                     finished = False
                     if (
                         token_id == self.eos_token_id
                         and not req.sampling_params.ignore_eos
+                        or req.output_len >= req.sampling_params.max_tokens
                     ):
-                        finished = True
-                        req.status = SequenceStatus.FINISHED
-                        self.prefill_manager.remove_finished(req)
-                    elif req.output_len >= req.sampling_params.max_tokens:
                         finished = True
                         req.status = SequenceStatus.FINISHED
                         self.prefill_manager.remove_finished(req)

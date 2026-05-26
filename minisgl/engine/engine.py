@@ -63,7 +63,11 @@ class Engine:
             model_type = self._model_type
             remap_fn = _get_remap_fn(model_type)
             loaded = load_weights_parallel(
-                self.model, state_dict, tp_rank, self.tp_size, remap_fn=remap_fn
+                self.model,
+                state_dict,
+                tp_rank,
+                self.tp_size,
+                remap_fn=remap_fn,
             )
             logger.info(f"Loaded {loaded} weights (model_type={model_type})")
 

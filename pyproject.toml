@@ -1,3 +1,88 @@
-[tool.isort]
-line_length = 120
-profile = "black"
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mini-sglang"
+version = "0.1.0"
+description = "A lightweight educational LLM inference framework (~8,000 lines)"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [
+    {name = "jianzhnie"},
+]
+keywords = ["llm", "inference", "sglang", "deep-learning", "education"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=2.0",
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.20",
+    "pydantic>=2.0",
+    "safetensors>=0.4",
+    "pyzmq>=25.0",
+]
+
+[project.optional-dependencies]
+moe = ["triton>=2.1"]
+flash-attn = ["flash-attn>=2.0"]
+flashinfer = ["flashinfer>=0.2"]
+all = ["mini-sglang[moe,flash-attn,flashinfer]"]
+
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.5",
+    "pre-commit>=3.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/jianzhnie/mini-sglang"
+Repository = "https://github.com/jianzhnie/mini-sglang"
+
+[tool.setuptools.packages.find]
+include = ["minisgl*"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "lf"
+
+[tool.ruff.lint]
+select = [
+    "F",    # Pyflakes
+    "E",    # Pycodestyle errors
+    "W",    # Pycodestyle warnings
+    "I",    # Isort (import sorting)
+    "B",    # Flake8-bugbear
+    "C4",   # Flake8-comprehensions
+    "SIM",  # Flake8-simplify
+]
+ignore = [
+    "E501",  # Line too long (handled by formatter)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["minisgl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = ["-v", "--tb=short", "--strict-markers"]

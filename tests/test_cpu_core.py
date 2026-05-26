@@ -241,7 +241,9 @@ class TestSchedulerBatch(unittest.TestCase):
         from minisgl.scheduler.batch import Req, SequenceStatus
 
         req = Req(
-            input_ids=[1, 2, 3], uid=0, sampling_params=SamplingParams(max_tokens=10)
+            input_ids=[1, 2, 3],
+            uid=0,
+            sampling_params=SamplingParams(max_tokens=10),
         )
         self.assertEqual(req.status, SequenceStatus.WAITING)
         req.status = SequenceStatus.RUNNING
@@ -275,7 +277,10 @@ class TestSchedulerBatch(unittest.TestCase):
         batch = Batch(reqs=[req], phase="prefill")
 
         ctx = BatchContext(
-            max_running_req=4, max_seq_len=16, page_size=4, device=torch.device("cpu")
+            max_running_req=4,
+            max_seq_len=16,
+            page_size=4,
+            device=torch.device("cpu"),
         )
         ctx.prepare(batch)
 

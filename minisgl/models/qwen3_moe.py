@@ -16,7 +16,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from minisgl.models.layers.linear import ColumnParallelLinear, RowParallelLinear
+from minisgl.models.layers.linear import (
+    ColumnParallelLinear,
+    RowParallelLinear,
+)
 from minisgl.models.layers.rms_norm import RMSNorm
 from minisgl.models.qwen3 import Qwen3Attention
 from minisgl.utils.device import get_tp_size

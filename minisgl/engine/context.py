@@ -73,7 +73,10 @@ class BatchContext:
         # Build req_to_token (page table): (num_reqs, max_seq_len)
         num_reqs = len(reqs)
         table = torch.full(
-            (num_reqs, self.max_seq_len), -1, dtype=torch.int32, device=self.device
+            (num_reqs, self.max_seq_len),
+            -1,
+            dtype=torch.int32,
+            device=self.device,
         )
         for i, req in enumerate(reqs):
             if req.cache_handle:

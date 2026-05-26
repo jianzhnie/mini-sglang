@@ -18,7 +18,10 @@ class DecodeManager:
     """
 
     def __init__(
-        self, args: ServerArgs, pool: KVCachePool, radix_cache: RadixCacheManager
+        self,
+        args: ServerArgs,
+        pool: KVCachePool,
+        radix_cache: RadixCacheManager,
     ):
         self.max_running_req = args.max_running_req
         self.page_size = args.page_size
