@@ -1,6 +1,5 @@
 """Tokenizer worker process: handles token encode/decode via ZMQ."""
 
-import pickle
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -57,9 +56,25 @@ class TokenizerWorker:
         )
 
     def apply_chat_template(self, messages: List[dict], add_generation_prompt: bool = True) -> str:
-        """Apply the model's chat template to convert messages to a prompt string."""
-        return self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=add_generation_prompt,
-        )
+        """Apply the model's chat template, with fallback for models without one."""
+        if hasattr(self.tokenizer, "chat_template") and self.tokenizer.chat_template:
+            return self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=add_generation_prompt,
+            )
+        # Fallback: simple concatenation for models without chat template (e.g., OPT)
+        parts = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "user":
+                parts.append(f"User: {content}")
+            elif role == "assistant":
+                parts.append(f"Assistant: {content}")
+            else:
+                parts.append(content)
+        prompt = "\n".join(parts)
+        if add_generation_prompt:
+            prompt += "\nAssistant:"
+        return prompt

@@ -44,7 +44,6 @@ def shard_tensor(tensor: torch.Tensor, dim: int, rank: int, world_size: int) -> 
     """Shard a tensor along the given dimension."""
     chunk_size = tensor.shape[dim] // world_size
     start = rank * chunk_size
-    end = start + chunk_size
     return tensor.narrow(dim, start, chunk_size).contiguous()
 
 
@@ -53,12 +52,20 @@ def load_weights_parallel(
     state_dict: Dict[str, torch.Tensor],
     tp_rank: int = 0,
     tp_size: int = 1,
+    remap_fn=None,
 ) -> None:
     """Load weights into a model, handling tensor parallelism sharding.
 
+    Args:
+        model: The model to load weights into.
+        state_dict: HF weight dictionary.
+        tp_rank: Tensor parallelism rank.
+        tp_size: Tensor parallelism size.
+        remap_fn: Optional function to remap HF keys → model param names.
+
     Handles:
-    - ColumnParallel: weight is sharded along dim 0 (output dim) — each rank gets a portion
-    - RowParallel: weight is sharded along dim 1 (input dim) — each rank gets a portion
+    - ColumnParallel: weight is sharded along dim 0 (output dim)
+    - RowParallel: weight is sharded along dim 1 (input dim)
     - Embedding: weight sharded along dim 0 (vocab dim)
     - Non-parallel: each rank gets full copy
     """
@@ -66,20 +73,36 @@ def load_weights_parallel(
     tp_rank = get_tp_rank()
     tp_size = get_tp_size()
 
+    loaded = 0
     for name, param in model.named_parameters():
-        if name not in state_dict:
-            continue
+        hf_name = remap_fn(name) if remap_fn else name
+        if hf_name not in state_dict:
+            # Try the original name as fallback
+            if name in state_dict:
+                hf_name = name
+            else:
+                continue
 
-        weight = state_dict[name]
+        weight = state_dict[hf_name]
 
-        # Handle ColumnParallelLinear weights (e.g., q_proj, k_proj, v_proj, gate_proj, up_proj)
+        # Handle ColumnParallelLinear weights
         if hasattr(param, "is_column_parallel") and param.is_column_parallel:
             weight = shard_tensor(weight, dim=0, rank=tp_rank, world_size=tp_size)
-        # Handle RowParallelLinear weights (e.g., o_proj, down_proj)
+        # Handle RowParallelLinear weights
         elif hasattr(param, "is_row_parallel") and param.is_row_parallel:
             weight = shard_tensor(weight, dim=1, rank=tp_rank, world_size=tp_size)
         # Handle VocabParallelEmbedding
         elif hasattr(param, "is_vocab_parallel") and param.is_vocab_parallel:
             weight = shard_tensor(weight, dim=0, rank=tp_rank, world_size=tp_size)
+        # Handle shape mismatch (e.g., embed_positions truncation)
+        elif param.shape != weight.shape and param.dim() >= 2:
+            weight = weight[:param.shape[0]] if weight.shape[0] > param.shape[0] else weight
 
-        param.data.copy_(weight.to(device=device, dtype=param.dtype))
+        if param.shape == weight.shape:
+            param.data.copy_(weight.to(device=device, dtype=param.dtype))
+            loaded += 1
+        elif param.dim() >= 2 and weight.shape[0] >= param.shape[0]:
+            param.data.copy_(weight[:param.shape[0]].to(device=device, dtype=param.dtype))
+            loaded += 1
+
+    return loaded

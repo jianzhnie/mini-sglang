@@ -162,8 +162,8 @@ async def chat_completions(request: ChatCompletionRequest):
         }
 
 
-async def _stream_chat_response(uid: int, result_queue: queue.Queue, model: str):
-    """SSE streaming generator for chat completions."""
+def _stream_chat_response(uid: int, result_queue: queue.Queue, model: str):
+    """SSE streaming generator for chat completions (sync, runs in thread pool)."""
     try:
         while True:
             token_id, finished = result_queue.get()
@@ -179,7 +179,7 @@ async def _stream_chat_response(uid: int, result_queue: queue.Queue, model: str)
                     "finish_reason": "stop" if finished else None,
                 }],
             }
-            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps(chunk, ensure_ascii=True)}\n\n"
 
             if finished:
                 break
@@ -229,8 +229,8 @@ async def completions(request: CompletionRequest):
         }
 
 
-async def _stream_completion_response(uid: int, result_queue: queue.Queue, model: str):
-    """SSE streaming generator for completions."""
+def _stream_completion_response(uid: int, result_queue: queue.Queue, model: str):
+    """SSE streaming generator for completions (sync, runs in thread pool)."""
     try:
         while True:
             token_id, finished = result_queue.get()
@@ -246,7 +246,7 @@ async def _stream_completion_response(uid: int, result_queue: queue.Queue, model
                     "finish_reason": "stop" if finished else None,
                 }],
             }
-            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps(chunk, ensure_ascii=True)}\n\n"
 
             if finished:
                 break

@@ -20,6 +20,15 @@ def _path_exists(path: str) -> bool:
     return os.path.isdir(path) and os.path.exists(os.path.join(path, "config.json"))
 
 
+def _get_remap_fn(model_type: str):
+    """Return a key remapping function for the given model type."""
+    if model_type == "opt":
+        def _remap(name: str) -> str:
+            return name.replace("model.", "model.decoder.")
+        return _remap
+    return None
+
+
 class Engine:
     """Core inference engine.
 
@@ -45,7 +54,11 @@ class Engine:
         # Load weights only if model path exists
         if server_args.model_path and _path_exists(server_args.model_path):
             state_dict = load_hf_weights(server_args.model_path)
-            load_weights_parallel(self.model, state_dict, tp_rank, self.tp_size)
+            model_type = self._detect_model_type()
+            remap_fn = _get_remap_fn(model_type)
+            loaded = load_weights_parallel(self.model, state_dict, tp_rank, self.tp_size,
+                                           remap_fn=remap_fn)
+            logger.info(f"Loaded {loaded} weights (model_type={model_type})")
 
         self.kv_cache_pool = self._allocate_kv_cache()
         self._assign_kv_cache()
