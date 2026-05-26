@@ -160,7 +160,16 @@ class Engine:
         """Run model forward pass on a batch."""
         if batch.phase == "prefill":
             self.batch_context.prepare(batch)
+            with torch.inference_mode():
+                return self.model(
+                    input_ids=batch.input_ids,
+                    positions=batch.positions,
+                    k_cache=self.k_cache,
+                    v_cache=self.v_cache,
+                    write_loc=batch.write_loc,
+                )
 
+        # Decode: eager forward (CUDA graph output plumbing TBD)
         with torch.inference_mode():
             return self.model(
                 input_ids=batch.input_ids,

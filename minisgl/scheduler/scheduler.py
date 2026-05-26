@@ -7,6 +7,7 @@ from minisgl.engine.kvcache.radix import RadixCacheManager
 from minisgl.scheduler.batch import Req, SequenceStatus
 from minisgl.scheduler.decode import DecodeManager
 from minisgl.scheduler.prefill import PrefillManager
+from minisgl.utils.logger import logger
 
 
 class Scheduler:
@@ -26,23 +27,49 @@ class Scheduler:
         self.pool = engine.kv_cache_pool
         self.radix_cache = RadixCacheManager(self.pool, server_args.page_size)
         self.prefill_manager = PrefillManager(server_args, self.pool, self.radix_cache)
-        self.decode_manager = DecodeManager(server_args, self.pool, self.radix_cache)
+        self.decode_manager = DecodeManager(
+            server_args, self.pool, self.radix_cache, device=engine.device
+        )
 
         self._uid_counter = 0
         self.eos_token_id = self._load_eos_token()
 
     def _load_eos_token(self) -> int:
-        """Load EOS token ID from model's tokenizer config."""
+        """Load EOS token ID from model config, with tokenizer fallback."""
         import json
         from pathlib import Path
 
-        path = Path(self.args.model_path) / "generation_config.json"
-        try:
-            with path.open() as f:
+        model_path = Path(self.args.model_path)
+
+        # Try generation_config.json first (most HF models have this)
+        gen_config = model_path / "generation_config.json"
+        if gen_config.exists():
+            with gen_config.open() as f:
                 cfg = json.load(f)
-            return cfg.get("eos_token_id", 151643)
-        except FileNotFoundError:
-            return 151643
+            if "eos_token_id" in cfg:
+                return cfg["eos_token_id"]
+
+        # Fallback: try tokenizer_config.json
+        tok_config = model_path / "tokenizer_config.json"
+        if tok_config.exists():
+            with tok_config.open() as f:
+                cfg = json.load(f)
+            if "eos_token_id" in cfg:
+                eos = cfg["eos_token_id"]
+                if isinstance(eos, dict):
+                    # Some configs have {"content": "...", "token_id": ...}
+                    return eos.get("token_id", eos.get("id", 0))
+                return eos
+
+        # Last resort: try config.json (some models store it here)
+        cfg_file = model_path / "config.json"
+        if cfg_file.exists():
+            with cfg_file.open() as f:
+                cfg = json.load(f)
+            return cfg.get("eos_token_id", 0)
+
+        logger.warning("Could not determine EOS token ID, using 0")
+        return 0
 
     def add_request(self, input_ids: list[int], sampling_params: SamplingParams) -> int:
         """Add a new request and return its UID."""

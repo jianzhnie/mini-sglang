@@ -132,21 +132,38 @@ class FlashAttentionBackend:
             ).transpose(1, 2)
 
         # Prefill: flash attention with varlen
-        # Flatten batch and seq dims
+        # Handle multiple requests by computing proper cu_seqlens
+        # q shape: (batch, num_heads, total_seq, head_dim) after batch-flatten
         q_flat = q.transpose(1, 2).reshape(-1, num_heads, head_dim)
         k_flat = k.transpose(1, 2).reshape(-1, num_heads, head_dim)
         v_flat = v.transpose(1, 2).reshape(-1, num_heads, head_dim)
 
+        # Build cu_seqlens: cumulative token counts per request
+        # When batch>1 and each request has different seq_len, need proper boundaries
         total_tokens = q_flat.shape[0]
-        cu_seqlens = torch.tensor([0, total_tokens], dtype=torch.int32, device=q.device)
+        tokens_per_req = total_tokens // batch
+        cu_seqlens = torch.arange(
+            0, total_tokens + 1, tokens_per_req, dtype=torch.int32, device=q.device
+        )
+        # Ensure last element matches total_tokens
+        if cu_seqlens[-1] != total_tokens:
+            cu_seqlens = torch.cat(
+                [
+                    cu_seqlens,
+                    torch.tensor([total_tokens], dtype=torch.int32, device=q.device),
+                ]
+            )
+        max_seqlen = (
+            int(cu_seqlens[1:].max().item()) if len(cu_seqlens) > 1 else total_tokens
+        )
 
         out = flash_attn_varlen_func(
             q_flat,
             k_flat,
             v_flat,
-            max_seqlen_q=seq_len,
+            max_seqlen_q=max_seqlen,
             cu_seqlens_q=cu_seqlens,
-            max_seqlen_k=seq_len,
+            max_seqlen_k=max_seqlen,
             cu_seqlens_k=cu_seqlens,
             softmax_scale=1.0 / math.sqrt(head_dim),
             causal=True,

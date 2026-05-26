@@ -24,8 +24,8 @@ class RotaryEmbedding:
         self.use_dynamic_ntk = use_dynamic_ntk
 
         # Precompute cos/sin tables
-        self._cos_table: torch.Tensor = None
-        self._sin_table: torch.Tensor = None
+        self._cos_table: torch.Tensor | None = None
+        self._sin_table: torch.Tensor | None = None
         self._build_cache(max_position_embeddings)
 
     def _build_cache(self, seq_len: int) -> None:

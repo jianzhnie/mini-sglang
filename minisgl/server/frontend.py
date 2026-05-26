@@ -8,6 +8,7 @@ __all__ = [
     "FrontendManager",
     "init_frontend",
 ]
+import asyncio
 import json
 import queue
 import threading
@@ -154,13 +155,17 @@ async def chat_completions(request: ChatCompletionRequest):
             media_type="text/event-stream",
         )
 
-    # Collect all tokens for non-streaming
+    # Collect all tokens for non-streaming (run blocking queue.get in thread)
     generated_tokens = []
-    while True:
-        token_id, finished = result_queue.get()
-        generated_tokens.append(token_id)
-        if finished:
-            break
+
+    def _collect_tokens():
+        while True:
+            token_id, finished = result_queue.get()
+            generated_tokens.append(token_id)
+            if finished:
+                break
+
+    await asyncio.to_thread(_collect_tokens)
 
     text = _frontend.tokenizer.tokenizer.decode(generated_tokens)
     _frontend.remove_result(uid)
@@ -232,11 +237,15 @@ async def completions(request: CompletionRequest):
         )
 
     generated_tokens = []
-    while True:
-        token_id, finished = result_queue.get()
-        generated_tokens.append(token_id)
-        if finished:
-            break
+
+    def _collect_tokens():
+        while True:
+            token_id, finished = result_queue.get()
+            generated_tokens.append(token_id)
+            if finished:
+                break
+
+    await asyncio.to_thread(_collect_tokens)
     text = _frontend.tokenizer.tokenizer.decode(generated_tokens)
     _frontend.remove_result(uid)
     return {

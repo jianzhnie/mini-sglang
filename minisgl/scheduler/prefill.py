@@ -50,10 +50,7 @@ class PrefillManager:
             if total_tokens + uncached > self.token_budget and scheduled:
                 break
 
-            # Check KV cache availability
-            new_pages = self._pages_needed(req)
-
-            # Try prefix matching
+            # Try prefix matching (may reduce pages needed via cache sharing)
             matched_len = self.radix_cache.match_prefix(req.input_ids)
             req.cached_len = max(req.cached_len, matched_len)
 
@@ -92,5 +89,6 @@ class PrefillManager:
         if req in self.running:
             self.running.remove(req)
         if req.cache_handle:
+            self.radix_cache.remove(req.input_ids)
             self.pool.free(req.cache_handle)
             req.cache_handle = None

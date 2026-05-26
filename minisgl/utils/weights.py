@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 from safetensors.torch import load_file as safe_load
 
-from minisgl.utils.device import get_device, get_tp_rank, get_tp_size
+from minisgl.utils.device import get_device
 
 
 def _iter_hf_files(model_path: str) -> Iterator[tuple[str, str]]:
@@ -80,8 +80,6 @@ def load_weights_parallel(
     - Non-parallel: each rank gets full copy
     """
     device = get_device()
-    tp_rank = get_tp_rank()
-    tp_size = get_tp_size()
 
     loaded = 0
     for name, param in model.named_parameters():

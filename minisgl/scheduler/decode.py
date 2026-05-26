@@ -22,12 +22,14 @@ class DecodeManager:
         args: ServerArgs,
         pool: KVCachePool,
         radix_cache: RadixCacheManager,
+        device: torch.device | None = None,
     ) -> None:
         self.max_running_req = args.max_running_req
         self.page_size = args.page_size
         self.pool = pool
         self.radix_cache = radix_cache
         self.naive_mode = True  # Skip KV cache for now
+        self.device = device or torch.device("cpu")
 
     def schedule_decode(self, running: list[Req]) -> Batch | None:
         if not running:
@@ -49,6 +51,10 @@ class DecodeManager:
             return None
 
         batch = Batch(reqs=running, phase="decode")
-        batch.input_ids = torch.tensor(all_input_ids, dtype=torch.long, device="cpu")
-        batch.positions = torch.tensor(all_positions, dtype=torch.long, device="cpu")
+        batch.input_ids = torch.tensor(
+            all_input_ids, dtype=torch.long, device=self.device
+        )
+        batch.positions = torch.tensor(
+            all_positions, dtype=torch.long, device=self.device
+        )
         return batch
