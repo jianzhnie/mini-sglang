@@ -52,7 +52,7 @@ def run_demo() -> None:
 
         scheduler = Scheduler(server_args, engine)
         input_ids = tokenizer.encode(prompt)
-        scheduler.add_request(input_ids, SamplingParams(temperature=0.0, max_tokens=20))
+        scheduler.add_request(input_ids, SamplingParams(temperature=0.0, max_tokens=60))
 
         generated: list[int] = []
         while not scheduler.is_idle():
