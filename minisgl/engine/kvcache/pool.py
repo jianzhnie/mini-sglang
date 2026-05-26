@@ -53,7 +53,6 @@ class KVCachePool:
         )
 
         self.free_pages: list[int] = list(range(num_pages))
-        self.used_pages: set = set()
 
     def alloc(self, num_pages: int) -> BaseCacheHandle:
         """Allocate num_pages from the free pool."""
@@ -64,14 +63,12 @@ class KVCachePool:
         handle = BaseCacheHandle()
         for _ in range(num_pages):
             page_id = self.free_pages.pop()
-            self.used_pages.add(page_id)
             handle.page_ids.append(page_id)
         return handle
 
     def free(self, handle: BaseCacheHandle) -> None:
         """Return pages to the free pool."""
         for page_id in handle.page_ids:
-            self.used_pages.discard(page_id)
             self.free_pages.append(page_id)
         handle.page_ids.clear()
 

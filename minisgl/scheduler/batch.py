@@ -17,7 +17,7 @@ class SequenceStatus(Enum):
     FINISHED = auto()
 
 
-@dataclass
+@dataclass(slots=True)
 class Req:
     """A single inference request tracked by the scheduler."""
 

@@ -171,26 +171,49 @@ class Engine:
             )
 
     def sample(self, logits: torch.Tensor, batch: Batch) -> list:
-        """Sample next tokens from logits."""
-        if batch.phase == "decode" and logits.dim() == 3 and logits.shape[1] == 1:
-            # Decode logits: (num_reqs, 1, vocab_size)
-            logits = logits.squeeze(1)
-            token_ids = []
-            for i, req in enumerate(batch.reqs):
-                next_token = self.sampler.sample(logits[i : i + 1], req.sampling_params)
-                token_ids.append(next_token.item())
-            return token_ids
+        """Sample next tokens from logits.
 
-        # Prefill or naive decode: logits are (total_tokens, vocab_size)
-        token_ids = []
+        Groups requests with identical sampling params for batched sampling.
+        """
+        if batch.phase == "decode" and logits.dim() == 3 and logits.shape[1] == 1:
+            logits = logits.squeeze(1)  # (num_reqs, vocab_size)
+            return self._sample_batched(logits, batch.reqs)
+
+        # Prefill: collect last-position logits per request
+        last_logits = []
         offset = 0
         for req in batch.reqs:
             req_len = len(req.input_ids)
-            seq_logits = logits[offset : offset + req_len]
-            last_logits = seq_logits[-1:]  # Only sample from last position
-            next_token = self.sampler.sample(last_logits, req.sampling_params)
-            token_ids.append(next_token.item())
+            last_logits.append(logits[offset + req_len - 1 : offset + req_len])
             offset += req_len
+
+        if last_logits:
+            batched = torch.cat(last_logits, dim=0)  # (num_reqs, vocab_size)
+            return self._sample_batched(batched, batch.reqs)
+        return []
+
+    def _sample_batched(self, logits: torch.Tensor, reqs: list) -> list:
+        """Batch sample by grouping requests with identical sampling params."""
+        from collections import defaultdict
+
+        groups: dict[tuple, list[int]] = defaultdict(list)
+        for i, req in enumerate(reqs):
+            key = (
+                req.sampling_params.temperature,
+                req.sampling_params.top_k,
+                req.sampling_params.top_p,
+            )
+            groups[key].append(i)
+
+        token_ids = [0] * len(reqs)
+        for indices in groups.values():
+            batch_logits = logits[indices]
+            # All requests in this group share the same sampling params
+            params = reqs[indices[0]].sampling_params
+            tokens = self.sampler.sample(batch_logits, params)
+            for j, idx in enumerate(indices):
+                token_ids[idx] = tokens[j].item()
+
         return token_ids
 
     def _capture_cuda_graphs(self) -> None:

@@ -33,12 +33,17 @@ class DecodeManager:
         if not running:
             return None
 
-        all_input_ids = []
-        all_positions = []
-
-        for req in running:
-            all_input_ids.extend(req.input_ids)
-            all_positions.extend(range(len(req.input_ids)))
+        # In real decode mode (with KV cache), only process the last token per request.
+        # In naive mode (no KV cache), re-process all tokens.
+        if self.naive_mode:
+            all_input_ids = []
+            all_positions = []
+            for req in running:
+                all_input_ids.extend(req.input_ids)
+                all_positions.extend(range(len(req.input_ids)))
+        else:
+            all_input_ids = [req.input_ids[-1] for req in running]
+            all_positions = [len(req.input_ids) - 1 for req in running]
 
         if not all_input_ids:
             return None

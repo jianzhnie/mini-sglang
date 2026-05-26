@@ -16,17 +16,15 @@ __all__ = [
 import torch
 import torch.nn as nn
 
+from minisgl.models.layers.attention import BaseAttention
 from minisgl.models.layers.embedding import VocabParallelEmbedding
-from minisgl.models.layers.linear import (
-    ColumnParallelLinear,
-    RowParallelLinear,
-)
+from minisgl.models.layers.linear import ColumnParallelLinear, RowParallelLinear
 from minisgl.models.layers.rms_norm import RMSNorm
 from minisgl.models.layers.rope import RotaryEmbedding
 from minisgl.utils.device import get_tp_size
 
 
-class LlamaAttention(nn.Module):
+class LlamaAttention(BaseAttention):
     """Multi-head attention for Llama with RoPE."""
 
     def __init__(
@@ -42,82 +40,32 @@ class LlamaAttention(nn.Module):
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
-        self.tp_size = get_tp_size()
-
-        self.num_local_heads = num_heads // self.tp_size
-        self.num_local_kv_heads = max(1, num_kv_heads // self.tp_size)
+        self.hidden_size = hidden_size
+        tp_size = get_tp_size()
+        self.num_local_heads = num_heads // tp_size
+        self.num_local_kv_heads = max(1, num_kv_heads // tp_size)
 
         self.q_proj = ColumnParallelLinear(
-            hidden_size,
-            num_heads * head_dim,
-            bias=False,
+            hidden_size, num_heads * head_dim, bias=False
         )
         self.k_proj = ColumnParallelLinear(
-            hidden_size,
-            num_kv_heads * head_dim,
-            bias=False,
+            hidden_size, num_kv_heads * head_dim, bias=False
         )
         self.v_proj = ColumnParallelLinear(
-            hidden_size,
-            num_kv_heads * head_dim,
-            bias=False,
+            hidden_size, num_kv_heads * head_dim, bias=False
         )
         self.o_proj = RowParallelLinear(num_heads * head_dim, hidden_size, bias=False)
-
         self.rotary_emb = RotaryEmbedding(head_dim, max_position_embeddings, rope_theta)
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-        k_cache: torch.Tensor | None = None,
-        v_cache: torch.Tensor | None = None,
-        write_loc: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if hidden_states.dim() == 2:
-            hidden_states = hidden_states.unsqueeze(0)
-            squeeze_out = True
-        else:
-            squeeze_out = False
+    def _project_qkv(self, hidden_states: torch.Tensor) -> tuple:
+        return (
+            self.q_proj(hidden_states),
+            self.k_proj(hidden_states),
+            self.v_proj(hidden_states),
+        )
 
-        if positions.dim() > 1:
-            positions = positions.squeeze(-1)
-
-        batch_size, seq_len = hidden_states.shape[:2]
-
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
-
-        q = q.view(batch_size, seq_len, self.num_local_heads, self.head_dim)
-        k = k.view(batch_size, seq_len, self.num_local_kv_heads, self.head_dim)
-        v = v.view(batch_size, seq_len, self.num_local_kv_heads, self.head_dim)
-
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        self.rotary_emb(q, k, positions)
-
-        if k_cache is not None and write_loc is not None:
-            num_kv_heads = k_cache.shape[2]
-            head_dim = k_cache.shape[3]
-            flat_k = k_cache.view(-1, num_kv_heads, head_dim)
-            flat_v = v_cache.view(-1, num_kv_heads, head_dim)
-            flat_in_k = k.transpose(1, 2).reshape(-1, num_kv_heads, head_dim)
-            flat_in_v = v.transpose(1, 2).reshape(-1, num_kv_heads, head_dim)
-            flat_k[write_loc] = flat_in_k
-            flat_v[write_loc] = flat_in_v
-
-        from minisgl.models.attention.backend import AttentionBackend
-
-        output = AttentionBackend.forward(q, k, v, k_cache, v_cache, write_loc)
-        output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
-
-        output = self.o_proj(output)
-        if squeeze_out:
-            output = output.squeeze(0)
-        return output
+    def _project_output(self, attn_output: torch.Tensor) -> torch.Tensor:
+        return self.o_proj(attn_output)
 
 
 class LlamaMLP(nn.Module):
@@ -126,9 +74,7 @@ class LlamaMLP(nn.Module):
     def __init__(self, hidden_size: int, intermediate_size: int) -> None:
         super().__init__()
         self.gate_proj = ColumnParallelLinear(
-            hidden_size,
-            intermediate_size,
-            bias=False,
+            hidden_size, intermediate_size, bias=False
         )
         self.up_proj = ColumnParallelLinear(hidden_size, intermediate_size, bias=False)
         self.down_proj = RowParallelLinear(intermediate_size, hidden_size, bias=False)
@@ -195,8 +141,7 @@ class LlamaModel(nn.Module):
         super().__init__()
         self.config = config
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
+            config.vocab_size, config.hidden_size
         )
         self.layers = nn.ModuleList(
             [
@@ -211,7 +156,7 @@ class LlamaModel(nn.Module):
                     config.rms_norm_eps,
                 )
                 for _ in range(config.num_layers)
-            ],
+            ]
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -225,7 +170,6 @@ class LlamaModel(nn.Module):
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
-
         for i, layer in enumerate(self.layers):
             layer_k_cache = k_cache[i] if k_cache is not None else None
             layer_v_cache = v_cache[i] if v_cache is not None else None
@@ -237,7 +181,6 @@ class LlamaModel(nn.Module):
                 layer_v_cache,
                 write_loc,
             )
-
         hidden_states, _ = self.norm(hidden_states)
         return hidden_states
 
@@ -249,9 +192,7 @@ class LlamaForCausalLM(nn.Module):
         super().__init__()
         self.model = LlamaModel(config)
         self.lm_head = ColumnParallelLinear(
-            config.hidden_size,
-            config.vocab_size,
-            bias=False,
+            config.hidden_size, config.vocab_size, bias=False
         )
         self.config = config
 
