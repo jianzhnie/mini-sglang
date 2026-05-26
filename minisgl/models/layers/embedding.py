@@ -23,6 +23,7 @@ class VocabParallelEmbedding(nn.Module):
         self.weight = nn.Parameter(
             torch.empty(self.num_embeddings_per_rank, embedding_dim),
         )
+        nn.init.normal_(self.weight)
         self.weight.is_vocab_parallel = True
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:

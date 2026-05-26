@@ -194,9 +194,8 @@ class Qwen3MoEDecoderLayer(nn.Module):
         attn_out = self.self_attn(hidden_states, positions, k_cache, v_cache, write_loc)
         hidden_states = attn_out + residual
 
-        hidden_states, residual = self.post_attention_layernorm(hidden_states)
-        if residual is None:
-            residual = hidden_states
+        residual = hidden_states
+        hidden_states, _ = self.post_attention_layernorm(hidden_states)
         mlp_out = self.mlp(hidden_states)
         return mlp_out + residual
 

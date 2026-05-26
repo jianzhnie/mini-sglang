@@ -62,7 +62,7 @@ def _apply_top_p(logits: torch.Tensor, p: float) -> torch.Tensor:
 
     # Remove tokens with cumulative probability above p (keep first token above threshold)
     sorted_indices_to_remove = cumulative_probs > p
-    sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1]
+    sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
     sorted_indices_to_remove[:, 0] = False
 
     indices_to_remove = sorted_indices_to_remove.scatter(
