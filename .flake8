@@ -1,8 +1,9 @@
 [flake8]
-ignore = 
-max-line-length = 79
+ignore =
+    W503, E203
+max-line-length = 120
 show-source = False
-application-import-names = 
+application-import-names =
 exclude =
     .git
     docs
@@ -11,5 +12,5 @@ exclude =
     env
     log
     dist
-	*.egg-info
-	__pycache__
+    *.egg-info
+    __pycache__

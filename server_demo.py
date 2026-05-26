@@ -18,10 +18,10 @@ with /v1/completions (text continuation). For /v1/chat/completions,
 use an instruction-tuned model like Qwen2-0.5B-Instruct.
 """
 
+import json
 import os
 import sys
 import time
-import json
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -33,7 +33,9 @@ HOST, PORT = "127.0.0.1", 8765
 def _request(path: str, body: dict = None) -> dict:
     url = f"http://{HOST}:{PORT}{path}"
     data = json.dumps(body).encode() if body else None
-    req = urllib.request.Request(url, data=data, method="GET" if body is None else "POST")
+    req = urllib.request.Request(
+        url, data=data, method="GET" if body is None else "POST"
+    )
     req.add_header("Content-Type", "application/json")
     with urllib.request.urlopen(req, timeout=120) as resp:
         content = resp.read().decode()
@@ -63,20 +65,26 @@ def _stream_request(path: str, body: dict):
 
 
 def start_server():
+    import uvicorn
+
     from minisgl.config import ModelArgs, ServerArgs
     from minisgl.engine.engine import Engine
+    from minisgl.models.tokenizer.worker import TokenizerWorker
     from minisgl.scheduler.scheduler import Scheduler
     from minisgl.server.frontend import app, init_frontend
-    from minisgl.models.tokenizer.worker import TokenizerWorker
-    from minisgl.utils.logger import setup_logger, logger
-    import uvicorn
+    from minisgl.utils.logger import logger, setup_logger
 
     setup_logger(level="INFO")
 
     args = ServerArgs(
-        model_path=MODEL_PATH, host=HOST, port=PORT,
-        tp_size=1, attention_backend="fa",
-        max_running_req=8, max_seq_len=512, page_size=16,
+        model_path=MODEL_PATH,
+        host=HOST,
+        port=PORT,
+        tp_size=1,
+        attention_backend="fa",
+        max_running_req=8,
+        max_seq_len=512,
+        page_size=16,
         memory_ratio=0.5,
     )
     model_args = ModelArgs.from_pretrained(MODEL_PATH)
@@ -112,34 +120,48 @@ if __name__ == "__main__":
         "To be or not to be,",
     ]
     for prompt in prompts:
-        resp = _request("/v1/completions", {
-            "model": "opt", "prompt": prompt,
-            "max_tokens": 20, "stream": False,
-        })
+        resp = _request(
+            "/v1/completions",
+            {
+                "model": "opt",
+                "prompt": prompt,
+                "max_tokens": 20,
+                "stream": False,
+            },
+        )
         text = resp.get("choices", [{}])[0].get("text", "").replace("\n", "\\n")
         print(f"  {prompt!r}")
         print(f"  → {text!r}\n")
 
     print("── POST /v1/completions (SSE stream) ──")
-    print(f"  Prompt: The capital of France is ")
+    print("  Prompt: The capital of France is")
     print("  → ", end="", flush=True)
-    _stream_request("/v1/completions", {
-        "model": "opt", "prompt": "The capital of France is ",
-        "max_tokens": 15, "stream": True,
-    })
+    _stream_request(
+        "/v1/completions",
+        {
+            "model": "opt",
+            "prompt": "The capital of France is",
+            "max_tokens": 15,
+            "stream": True,
+        },
+    )
 
     print("\n── POST /v1/chat/completions (sync) ──")
     print("  Note: OPT is a base model, output may be low quality.")
-    resp = _request("/v1/chat/completions", {
-        "model": "opt",
-        "messages": [
-            {"role": "user", "content": "The weather today is"},
-        ],
-        "max_tokens": 15, "stream": False,
-    })
+    resp = _request(
+        "/v1/chat/completions",
+        {
+            "model": "opt",
+            "messages": [
+                {"role": "user", "content": "The weather today is"},
+            ],
+            "max_tokens": 15,
+            "stream": False,
+        },
+    )
     content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
     content = content.replace("\n", "\\n") if content else "(empty)"
-    print(f"  User: The weather today is")
+    print("  User: The weather today is")
     print(f"  Assistant: {content}")
 
     print("\n" + "=" * 60)

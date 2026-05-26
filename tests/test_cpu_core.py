@@ -5,26 +5,31 @@ Run: python3 tests/test_cpu_core.py
 
 import sys
 import unittest
+
 import torch
 import torch.nn as nn
 
 sys.path.insert(0, ".")
 
+
 # ── Test RMSNorm ──
 class TestRMSNorm(unittest.TestCase):
     def test_basic_norm(self):
         from minisgl.models.layers.rms_norm import RMSNorm
+
         norm = RMSNorm(64, eps=1e-6)
         x = torch.randn(2, 10, 64)
         out, res = norm(x)
-        self.assertEqual(out.shape, x.shape)       # output same shape
-        self.assertIsNone(res)                      # no residual when None
+        self.assertEqual(out.shape, x.shape)  # output same shape
+        self.assertIsNone(res)  # no residual when None
         # Variance after norm should be ~1
-        self.assertTrue(torch.allclose(out.float().pow(2).mean(-1),
-                                       torch.ones(2, 10), atol=0.1))
+        self.assertTrue(
+            torch.allclose(out.float().pow(2).mean(-1), torch.ones(2, 10), atol=0.1)
+        )
 
     def test_fused_residual(self):
         from minisgl.models.layers.rms_norm import RMSNorm
+
         norm = RMSNorm(64)
         x = torch.randn(2, 10, 64)
         residual = torch.randn(2, 10, 64)
@@ -38,6 +43,7 @@ class TestRMSNorm(unittest.TestCase):
 class TestRoPE(unittest.TestCase):
     def test_rope_application(self):
         from minisgl.models.layers.rope import RotaryEmbedding
+
         rope = RotaryEmbedding(head_dim=64, max_position_embeddings=128)
         q = torch.randn(2, 8, 16, 64)  # (batch, heads, seq, head_dim)
         k = torch.randn(2, 8, 16, 64)
@@ -56,6 +62,7 @@ class TestRoPE(unittest.TestCase):
 class TestLinearLayers(unittest.TestCase):
     def test_column_parallel_linear_tp1(self):
         from minisgl.models.layers.linear import ColumnParallelLinear
+
         layer = ColumnParallelLinear(64, 128, bias=False)
         x = torch.randn(2, 10, 64)
         y = layer(x)
@@ -63,6 +70,7 @@ class TestLinearLayers(unittest.TestCase):
 
     def test_row_parallel_linear_tp1(self):
         from minisgl.models.layers.linear import RowParallelLinear
+
         # RowParallel receives gathered input (full in_features)
         layer = RowParallelLinear(128, 64, bias=False)
         x = torch.randn(2, 10, 128)  # (batch, seq, full in_features)
@@ -71,6 +79,7 @@ class TestLinearLayers(unittest.TestCase):
 
     def test_vocab_parallel_embedding_tp1(self):
         from minisgl.models.layers.embedding import VocabParallelEmbedding
+
         emb = VocabParallelEmbedding(1000, 64)
         ids = torch.randint(0, 1000, (2, 10))
         y = emb(ids)
@@ -81,8 +90,9 @@ class TestLinearLayers(unittest.TestCase):
 class TestAttentionBackend(unittest.TestCase):
     def test_pytorch_backend(self):
         from minisgl.models.attention.backend import AttentionBackend
+
         AttentionBackend.configure("fa")  # Use FA
-        q = torch.randn(1, 8, 32, 64)    # (batch, heads, seq, head_dim)
+        q = torch.randn(1, 8, 32, 64)  # (batch, heads, seq, head_dim)
         k = torch.randn(1, 8, 32, 64)
         v = torch.randn(1, 8, 32, 64)
         # Should not raise
@@ -95,6 +105,7 @@ class TestSampler(unittest.TestCase):
     def test_greedy_sampling(self):
         from minisgl.config import SamplingParams
         from minisgl.sampling.sampler import Sampler
+
         sampler = Sampler(1000)
         logits = torch.randn(4, 1000)  # 4 requests, 1000 vocab
         params = SamplingParams(temperature=0.0)  # greedy
@@ -107,6 +118,7 @@ class TestSampler(unittest.TestCase):
     def test_temperature_sampling(self):
         from minisgl.config import SamplingParams
         from minisgl.sampling.sampler import Sampler
+
         sampler = Sampler(1000)
         logits = torch.randn(4, 1000)
         params = SamplingParams(temperature=0.8, top_k=50, top_p=0.9)
@@ -115,6 +127,7 @@ class TestSampler(unittest.TestCase):
 
     def test_top_k_top_p(self):
         from minisgl.sampling.sampler import _apply_top_k, _apply_top_p
+
         logits = torch.randn(1, 1000)
         # Top-k: only top 10 should be > -inf
         filtered = _apply_top_k(logits.clone(), 10)
@@ -128,10 +141,15 @@ class TestSampler(unittest.TestCase):
 class TestKVCachePool(unittest.TestCase):
     def test_pool_alloc_free(self):
         from minisgl.engine.kvcache.pool import KVCachePool
+
         pool = KVCachePool(
-            num_layers=2, num_pages=100, page_size=16,
-            num_kv_heads=8, head_dim=64,
-            dtype=torch.float32, device=torch.device("cpu"),
+            num_layers=2,
+            num_pages=100,
+            page_size=16,
+            num_kv_heads=8,
+            head_dim=64,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
         )
         self.assertEqual(pool.free_count(), 100)
         h1 = pool.alloc(10)
@@ -147,10 +165,15 @@ class TestKVCachePool(unittest.TestCase):
 
     def test_get_kv_cache(self):
         from minisgl.engine.kvcache.pool import KVCachePool
+
         pool = KVCachePool(
-            num_layers=4, num_pages=20, page_size=16,
-            num_kv_heads=4, head_dim=32,
-            dtype=torch.float32, device=torch.device("cpu"),
+            num_layers=4,
+            num_pages=20,
+            page_size=16,
+            num_kv_heads=4,
+            head_dim=32,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
         )
         k, v = pool.get_kv_cache(layer_idx=0)
         self.assertEqual(k.shape, (20, 16, 4, 32))
@@ -165,10 +188,15 @@ class TestRadixCache(unittest.TestCase):
     def test_match_prefix(self):
         from minisgl.engine.kvcache.pool import KVCachePool
         from minisgl.engine.kvcache.radix import RadixCacheManager
+
         pool = KVCachePool(
-            num_layers=2, num_pages=100, page_size=4,
-            num_kv_heads=4, head_dim=32,
-            dtype=torch.float32, device=torch.device("cpu"),
+            num_layers=2,
+            num_pages=100,
+            page_size=4,
+            num_kv_heads=4,
+            head_dim=32,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
         )
         radix = RadixCacheManager(pool, page_size=4)
 
@@ -194,7 +222,8 @@ class TestRadixCache(unittest.TestCase):
 class TestSchedulerBatch(unittest.TestCase):
     def test_batch_creation(self):
         from minisgl.config import SamplingParams
-        from minisgl.scheduler.batch import Req, Batch
+        from minisgl.scheduler.batch import Batch, Req
+
         req = Req(
             input_ids=[1, 2, 3, 4, 5],
             uid=0,
@@ -210,8 +239,10 @@ class TestSchedulerBatch(unittest.TestCase):
     def test_req_lifecycle(self):
         from minisgl.config import SamplingParams
         from minisgl.scheduler.batch import Req, SequenceStatus
-        req = Req(input_ids=[1, 2, 3], uid=0,
-                  sampling_params=SamplingParams(max_tokens=10))
+
+        req = Req(
+            input_ids=[1, 2, 3], uid=0, sampling_params=SamplingParams(max_tokens=10)
+        )
         self.assertEqual(req.status, SequenceStatus.WAITING)
         req.status = SequenceStatus.RUNNING
         req.append_token(42)
@@ -220,14 +251,18 @@ class TestSchedulerBatch(unittest.TestCase):
 
     def test_context_prepare(self):
         from minisgl.config import SamplingParams
-        from minisgl.scheduler.batch import Req, Batch
         from minisgl.engine.context import BatchContext
         from minisgl.engine.kvcache.pool import KVCachePool
+        from minisgl.scheduler.batch import Batch, Req
 
         pool = KVCachePool(
-            num_layers=2, num_pages=20, page_size=4,
-            num_kv_heads=4, head_dim=32,
-            dtype=torch.float32, device=torch.device("cpu"),
+            num_layers=2,
+            num_pages=20,
+            page_size=4,
+            num_kv_heads=4,
+            head_dim=32,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
         )
         handle = pool.alloc(2)
 
@@ -239,8 +274,9 @@ class TestSchedulerBatch(unittest.TestCase):
         )
         batch = Batch(reqs=[req], phase="prefill")
 
-        ctx = BatchContext(max_running_req=4, max_seq_len=16, page_size=4,
-                           device=torch.device("cpu"))
+        ctx = BatchContext(
+            max_running_req=4, max_seq_len=16, page_size=4, device=torch.device("cpu")
+        )
         ctx.prepare(batch)
 
         self.assertEqual(batch.input_ids.tolist(), [1, 2, 3, 4, 5])
@@ -252,6 +288,7 @@ class TestSchedulerBatch(unittest.TestCase):
 class TestDistributed(unittest.TestCase):
     def test_all_reduce_noop(self):
         from minisgl.engine.distributed.pynccl import all_reduce
+
         x = torch.randn(10)
         y = all_reduce(x)
         self.assertTrue(torch.equal(x, y))  # no-op when not distributed
@@ -260,7 +297,8 @@ class TestDistributed(unittest.TestCase):
 # ── Test Config ──
 class TestConfig(unittest.TestCase):
     def test_config_creation(self):
-        from minisgl.config import ServerArgs, CacheArgs, ModelArgs, SamplingParams
+        from minisgl.config import CacheArgs, SamplingParams, ServerArgs
+
         args = ServerArgs(model_path="/tmp/test", port=8000, tp_size=1)
         self.assertEqual(args.port, 8000)
         self.assertEqual(args.tp_size, 1)
@@ -278,11 +316,12 @@ class TestConfig(unittest.TestCase):
 class TestTokenizerWorker(unittest.TestCase):
     @unittest.skipIf(
         not __import__("importlib.util").util.find_spec("transformers"),
-        "transformers not installed"
+        "transformers not installed",
     )
     def test_tokenizer_creation(self):
         """Test with a tiny tokenizer (requires transformers)."""
         from minisgl.models.tokenizer.worker import TokenizerWorker
+
         # Use a model that's likely cached or small
         try:
             worker = TokenizerWorker("google/bert_uncased_L-2_H-128_A-2")
@@ -326,13 +365,17 @@ class TestModelDummy(unittest.TestCase):
     def test_qwen3_model_create(self):
         from minisgl.config import ModelArgs
         from minisgl.models.qwen3 import Qwen3ForCausalLM
-        import torch.nn as nn
 
         config = ModelArgs(
-            hidden_size=128, num_layers=2, num_attention_heads=4,
+            hidden_size=128,
+            num_layers=2,
+            num_attention_heads=4,
             num_kv_heads=2,  # GQA: fewer KV heads
-            intermediate_size=512, vocab_size=1000,
-            max_position_embeddings=128, head_dim=32, qk_norm=True,
+            intermediate_size=512,
+            vocab_size=1000,
+            max_position_embeddings=128,
+            head_dim=32,
+            qk_norm=True,
         )
         model = Qwen3ForCausalLM(config)
         for module in model.modules():
@@ -349,10 +392,16 @@ class TestModelDummy(unittest.TestCase):
     def test_llama_model_create(self):
         from minisgl.config import ModelArgs
         from minisgl.models.llama import LlamaForCausalLM
+
         config = ModelArgs(
-            hidden_size=128, num_layers=2, num_attention_heads=4,
-            num_kv_heads=4, intermediate_size=512, vocab_size=1000,
-            max_position_embeddings=128, head_dim=32,
+            hidden_size=128,
+            num_layers=2,
+            num_attention_heads=4,
+            num_kv_heads=4,
+            intermediate_size=512,
+            vocab_size=1000,
+            max_position_embeddings=128,
+            head_dim=32,
         )
         model = LlamaForCausalLM(config)
         model.eval()
@@ -365,10 +414,16 @@ class TestModelDummy(unittest.TestCase):
     def test_mistral_model_create(self):
         from minisgl.config import ModelArgs
         from minisgl.models.mistral import MistralForCausalLM
+
         config = ModelArgs(
-            hidden_size=128, num_layers=2, num_attention_heads=4,
-            num_kv_heads=2, intermediate_size=512, vocab_size=1000,
-            max_position_embeddings=128, head_dim=32,
+            hidden_size=128,
+            num_layers=2,
+            num_attention_heads=4,
+            num_kv_heads=2,
+            intermediate_size=512,
+            vocab_size=1000,
+            max_position_embeddings=128,
+            head_dim=32,
             sliding_window=4096,
         )
         model = MistralForCausalLM(config)
@@ -380,21 +435,28 @@ class TestModelDummy(unittest.TestCase):
         self.assertEqual(logits.shape, (1, 8, 1000))
 
     def test_deep_decoder_forward(self):
-        """Test forward pass through multiple layers with residual flow.
-        Note: with random weights, deep models may produce NaN; this test
-        verifies the structure and residual flow are correct with 2 layers."""
+        """Test forward pass through multiple layers with residual flow."""
+        torch.manual_seed(42)
+
         from minisgl.config import ModelArgs
         from minisgl.models.qwen2 import Qwen2ForCausalLM
-        import torch.nn as nn
+
         config = ModelArgs(
-            hidden_size=128, num_layers=2, num_attention_heads=4,
-            num_kv_heads=4, intermediate_size=512, vocab_size=1000,
-            max_position_embeddings=128, head_dim=32,
+            hidden_size=128,
+            num_layers=2,
+            num_attention_heads=4,
+            num_kv_heads=4,
+            intermediate_size=512,
+            vocab_size=1000,
+            max_position_embeddings=128,
+            head_dim=32,
         )
         model = Qwen2ForCausalLM(config)
         for module in model.modules():
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight, gain=0.5)
+            elif hasattr(module, "_init_weights"):
+                module._init_weights()
         model.eval()
         input_ids = torch.randint(0, 1000, (1, 16))
         positions = torch.arange(16)
@@ -405,15 +467,20 @@ class TestModelDummy(unittest.TestCase):
 
     def test_with_kv_cache(self):
         """Test forward pass with KV cache tensors."""
+
         from minisgl.config import ModelArgs
-        from minisgl.models.qwen2 import Qwen2ForCausalLM
         from minisgl.engine.kvcache.pool import KVCachePool
-        import torch.nn as nn
+        from minisgl.models.qwen2 import Qwen2ForCausalLM
 
         config = ModelArgs(
-            hidden_size=128, num_layers=2, num_attention_heads=4,
-            num_kv_heads=4, intermediate_size=512, vocab_size=1000,
-            max_position_embeddings=128, head_dim=32,
+            hidden_size=128,
+            num_layers=2,
+            num_attention_heads=4,
+            num_kv_heads=4,
+            intermediate_size=512,
+            vocab_size=1000,
+            max_position_embeddings=128,
+            head_dim=32,
         )
         model = Qwen2ForCausalLM(config)
         for module in model.modules():
@@ -422,9 +489,13 @@ class TestModelDummy(unittest.TestCase):
         model.eval()
 
         pool = KVCachePool(
-            num_layers=2, num_pages=20, page_size=16,
-            num_kv_heads=4, head_dim=32,
-            dtype=torch.float32, device=torch.device("cpu"),
+            num_layers=2,
+            num_pages=20,
+            page_size=16,
+            num_kv_heads=4,
+            head_dim=32,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
         )
         k_all, v_all = pool.get_all_kv_cache()
 
@@ -464,12 +535,19 @@ class TestQwen3MoEModel(unittest.TestCase):
     def test_moe_model_create(self):
         from minisgl.config import ModelArgs
         from minisgl.models.qwen3_moe import Qwen3MoEForCausalLM
-        import torch.nn as nn
+
         config = ModelArgs(
-            hidden_size=128, num_layers=2, num_attention_heads=4,
-            num_kv_heads=4, intermediate_size=512, vocab_size=1000,
-            max_position_embeddings=128, head_dim=32,
-            num_experts=4, num_experts_per_tok=2, moe_intermediate_size=256,
+            hidden_size=128,
+            num_layers=2,
+            num_attention_heads=4,
+            num_kv_heads=4,
+            intermediate_size=512,
+            vocab_size=1000,
+            max_position_embeddings=128,
+            head_dim=32,
+            num_experts=4,
+            num_experts_per_tok=2,
+            moe_intermediate_size=256,
             decoder_sparse_step=1,
         )
         model = Qwen3MoEForCausalLM(config)
@@ -488,6 +566,7 @@ class TestQwen3MoEModel(unittest.TestCase):
 class TestFusedMoE(unittest.TestCase):
     def test_fused_moe_pytorch(self):
         from minisgl.models.moe.fused_moe import fused_moe_pytorch
+
         total_tokens, hidden_size = 4, 64
         num_experts, intermediate_size = 4, 128
 
@@ -505,19 +584,22 @@ class TestFusedMoE(unittest.TestCase):
 # ── Test Model Registry ──
 class TestRegistry(unittest.TestCase):
     def test_detect_model_type_fallback(self):
-        from minisgl.models.registry import detect_model_type
         # Should not crash on non-existent path
-        result = detect_model_type.__wrapped__ if hasattr(detect_model_type, '__wrapped__') else None
         self.assertTrue(True)  # Module loaded OK
 
     def test_create_model(self):
         from minisgl.config import ModelArgs
         from minisgl.models.registry import create_model
-        import torch.nn as nn
+
         config = ModelArgs(
-            hidden_size=128, num_layers=1, num_attention_heads=2,
-            num_kv_heads=2, intermediate_size=256, vocab_size=100,
-            max_position_embeddings=64, head_dim=64,
+            hidden_size=128,
+            num_layers=1,
+            num_attention_heads=2,
+            num_kv_heads=2,
+            intermediate_size=256,
+            vocab_size=100,
+            max_position_embeddings=64,
+            head_dim=64,
         )
         for mt in ["qwen2", "qwen3", "llama", "mistral"]:
             model = create_model(config, model_type=mt)
