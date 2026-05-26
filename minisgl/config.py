@@ -1,9 +1,9 @@
 """Configuration dataclasses for mini-sglang."""
 
-__all__ = ["SamplingParams", "ServerArgs", "CacheArgs", "ModelArgs"]
+__all__ = ["CacheArgs", "ModelArgs", "SamplingParams", "ServerArgs"]
 import json
-import os
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass
@@ -35,7 +35,7 @@ class ServerArgs:
     trust_remote_code: bool = False
     shell: bool = False
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.cuda_graph_bs is None:
             self.cuda_graph_bs = self.max_running_req
 
@@ -89,8 +89,8 @@ class ModelArgs:
 
     @classmethod
     def from_pretrained(cls, model_path: str) -> "ModelArgs":
-        config_file = os.path.join(model_path, "config.json")
-        with open(config_file) as f:
+        config_file = Path(model_path) / "config.json"
+        with config_file.open() as f:
             cfg = json.load(f)
 
         num_kv_heads = cfg.get("num_key_value_heads", cfg.get("num_attention_heads", 0))

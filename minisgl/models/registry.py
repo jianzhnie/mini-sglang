@@ -11,9 +11,9 @@ Supports all model architectures:
 
 from __future__ import annotations
 
-__all__ = ["detect_model_type", "create_model"]
+__all__ = ["create_model", "detect_model_type"]
 import json
-import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from minisgl.utils.logger import logger
@@ -44,8 +44,8 @@ def detect_model_type(model_path: str) -> str:
     Returns:
         Model type string (e.g. "qwen2", "llama", "opt").
     """
-    config_file = os.path.join(model_path, "config.json")
-    with open(config_file) as f:
+    config_file = Path(model_path) / "config.json"
+    with config_file.open() as f:
         cfg = json.load(f)
 
     architectures = cfg.get("architectures", [])
@@ -74,7 +74,7 @@ def detect_model_type(model_path: str) -> str:
         return "mistral"
 
     logger.warning(
-        f"Could not detect model type from architectures: {architectures}. Defaulting to qwen2."
+        f"Could not detect model type from architectures: {architectures}. Defaulting to qwen2.",
     )
     return "qwen2"
 
@@ -94,9 +94,10 @@ def create_model(config: ModelArgs, model_type: str) -> nn.Module:
     """
     entry = _MODEL_ENTRYPOINTS.get(model_type)
     if entry is None:
-        raise ValueError(
+        msg = (
             f"Unknown model type: {model_type!r}. Available: {list(_MODEL_ENTRYPOINTS)}"
         )
+        raise ValueError(msg)
 
     module_path, class_name = entry
     import importlib

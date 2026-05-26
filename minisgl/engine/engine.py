@@ -2,24 +2,28 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from minisgl.config import ModelArgs, ServerArgs
+    from minisgl.scheduler.batch import Batch
+
 __all__ = ["Engine"]
 import torch
 
-from minisgl.config import ModelArgs, ServerArgs
 from minisgl.engine.context import BatchContext
 from minisgl.engine.kvcache.pool import KVCachePool
 from minisgl.models.attention.backend import AttentionBackend
 from minisgl.sampling.sampler import Sampler
-from minisgl.scheduler.batch import Batch
 from minisgl.utils.device import get_device, init_distributed
 from minisgl.utils.logger import logger
 from minisgl.utils.weights import load_hf_weights, load_weights_parallel
 
 
 def _path_exists(path: str) -> bool:
-    import os
+    from pathlib import Path
 
-    return os.path.isdir(path) and os.path.exists(os.path.join(path, "config.json"))
+    return Path(path).is_dir() and (Path(path) / "config.json").exists()
 
 
 def _get_remap_fn(model_type: str):
@@ -40,8 +44,11 @@ class Engine:
     """
 
     def __init__(
-        self, server_args: ServerArgs, model_args: ModelArgs, tp_rank: int = 0
-    ):
+        self,
+        server_args: ServerArgs,
+        model_args: ModelArgs,
+        tp_rank: int = 0,
+    ) -> None:
         self.server_args = server_args
         self.model_args = model_args
         self.tp_rank = tp_rank
@@ -126,7 +133,8 @@ class Engine:
 
         num_pages = max(1, available_mem // bytes_per_page)
         max_pages_needed = args.max_running_req * max(
-            1, args.max_seq_len // args.page_size + 1
+            1,
+            args.max_seq_len // args.page_size + 1,
         )
         num_pages = min(num_pages, max_pages_needed)
 
@@ -198,10 +206,14 @@ class Engine:
         logger.info(f"Capturing CUDA graphs for batch sizes: {batch_sizes}")
 
         for bs in batch_sizes:
-            try:
-                self._capture_graph(bs)
-            except Exception as e:
-                logger.warning(f"Failed to capture CUDA graph for bs={bs}: {e}")
+            self._capture_graph_safe(bs)
+
+    def _capture_graph_safe(self, batch_size: int) -> None:
+        """Capture a CUDA graph, logging but not raising on failure."""
+        try:
+            self._capture_graph(batch_size)
+        except RuntimeError as e:
+            logger.warning(f"Failed to capture CUDA graph for bs={batch_size}: {e}")
 
     def _capture_graph(self, batch_size: int) -> None:
         """Capture a single CUDA graph for a given batch size."""

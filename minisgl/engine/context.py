@@ -22,7 +22,7 @@ class BatchContext:
         max_seq_len: int,
         page_size: int,
         device: torch.device,
-    ):
+    ) -> None:
         self.max_running_req = max_running_req
         self.max_seq_len = max_seq_len
         self.page_size = page_size
@@ -59,15 +59,21 @@ class BatchContext:
                 write_loc.extend([-1] * req.uncached_len)
 
         batch.input_ids = torch.tensor(
-            all_input_ids, dtype=torch.long, device=self.device
+            all_input_ids,
+            dtype=torch.long,
+            device=self.device,
         )
         batch.positions = torch.tensor(
-            all_positions, dtype=torch.long, device=self.device
+            all_positions,
+            dtype=torch.long,
+            device=self.device,
         )
 
         if write_loc:
             batch.write_loc = torch.tensor(
-                write_loc, dtype=torch.int32, device=self.device
+                write_loc,
+                dtype=torch.int32,
+                device=self.device,
             )
 
         # Build req_to_token (page table): (num_reqs, max_seq_len)

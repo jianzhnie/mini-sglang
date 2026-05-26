@@ -1,6 +1,6 @@
 """Logging utilities."""
 
-__all__ = ["setup_logger", "logger"]
+__all__ = ["logger", "setup_logger"]
 import logging
 import sys
 

@@ -40,7 +40,7 @@ class KVCachePool:
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
 
-        # Allocate one large tensor: (2, num_layers, num_pages, page_size, num_heads, head_dim)
+        # (2, num_layers, num_pages, page_size, num_heads, head_dim)
         self.buffer = torch.empty(
             2,
             num_layers,
@@ -58,9 +58,8 @@ class KVCachePool:
     def alloc(self, num_pages: int) -> BaseCacheHandle:
         """Allocate num_pages from the free pool."""
         if len(self.free_pages) < num_pages:
-            raise RuntimeError(
-                f"KV cache out of memory: requested {num_pages} pages, only {len(self.free_pages)} free"
-            )
+            msg = f"KV cache out of memory: requested {num_pages} pages, only {len(self.free_pages)} free"
+            raise RuntimeError(msg)
 
         handle = BaseCacheHandle()
         for _ in range(num_pages):

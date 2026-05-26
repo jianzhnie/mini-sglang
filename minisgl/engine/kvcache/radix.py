@@ -5,29 +5,27 @@ arrives, the tree is traversed to find the longest common prefix,
 avoiding redundant KV cache computation.
 """
 
-__all__ = ["RadixNode", "RadixCacheManager"]
-from typing import Optional
-
+__all__ = ["RadixCacheManager", "RadixNode"]
 from minisgl.engine.kvcache.pool import BaseCacheHandle, KVCachePool
 
 
 class RadixNode:
     """A node in the radix tree."""
 
-    __slots__ = ("token", "children", "ref_count", "cache_handle", "parent")
+    __slots__ = ("cache_handle", "children", "parent", "ref_count", "token")
 
-    def __init__(self, token: int = -1):
+    def __init__(self, token: int = -1) -> None:
         self.token = token
-        self.children: dict[int, "RadixNode"] = {}
+        self.children: dict[int, RadixNode] = {}
         self.ref_count: int = 0
         self.cache_handle: BaseCacheHandle | None = None
-        self.parent: Optional["RadixNode"] = None
+        self.parent: RadixNode | None = None
 
 
 class RadixCacheManager:
     """Radix tree cache that matches common prefixes and shares KV cache pages."""
 
-    def __init__(self, pool: KVCachePool, page_size: int):
+    def __init__(self, pool: KVCachePool, page_size: int) -> None:
         self.pool = pool
         self.page_size = page_size
         self.root = RadixNode()

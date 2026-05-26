@@ -47,7 +47,10 @@ class RotaryEmbedding:
             self._build_cache(max(seq_len, self.max_position_embeddings))
 
     def __call__(
-        self, q: torch.Tensor, k: torch.Tensor, positions: torch.Tensor
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        positions: torch.Tensor,
     ) -> None:
         """Apply RoPE to q and k in-place.
 

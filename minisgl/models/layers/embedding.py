@@ -21,7 +21,7 @@ class VocabParallelEmbedding(nn.Module):
         self.original_vocab_size = num_embeddings
 
         self.weight = nn.Parameter(
-            torch.empty(self.num_embeddings_per_rank, embedding_dim)
+            torch.empty(self.num_embeddings_per_rank, embedding_dim),
         )
         self.weight.is_vocab_parallel = True
 
@@ -33,7 +33,8 @@ class VocabParallelEmbedding(nn.Module):
         """
         mask = (input_ids >= self.vocab_start) & (input_ids < self.vocab_end)
         safe_ids = (input_ids - self.vocab_start).clamp(
-            0, self.num_embeddings_per_rank - 1
+            0,
+            self.num_embeddings_per_rank - 1,
         )
         out = F.embedding(safe_ids, self.weight)
         out = out * mask.unsqueeze(-1).to(out.dtype)

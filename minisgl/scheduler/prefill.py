@@ -2,7 +2,6 @@
 
 __all__ = ["PrefillManager"]
 from collections import deque
-from typing import Deque
 
 from minisgl.config import ServerArgs
 from minisgl.engine.kvcache.pool import KVCachePool
@@ -18,7 +17,7 @@ class PrefillManager:
         args: ServerArgs,
         pool: KVCachePool,
         radix_cache: RadixCacheManager,
-    ):
+    ) -> None:
         self.max_running_req = args.max_running_req
         self.max_seq_len = args.max_seq_len
         self.page_size = args.page_size
@@ -26,7 +25,7 @@ class PrefillManager:
 
         self.pool = pool
         self.radix_cache = radix_cache
-        self.pending: Deque[Req] = deque()
+        self.pending: deque[Req] = deque()
         self.running: list[Req] = []
 
     def add_request(self, req: Req) -> None:
@@ -56,8 +55,7 @@ class PrefillManager:
 
             # Try prefix matching
             matched_len = self.radix_cache.match_prefix(req.input_ids)
-            if matched_len > req.cached_len:
-                req.cached_len = matched_len
+            req.cached_len = max(req.cached_len, matched_len)
 
             new_pages = self._pages_needed(req)
 

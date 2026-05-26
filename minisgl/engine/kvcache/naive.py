@@ -9,7 +9,7 @@ from minisgl.engine.kvcache.pool import BaseCacheHandle, KVCachePool
 class NaiveCacheManager:
     """Simple LRU cache manager without prefix sharing."""
 
-    def __init__(self, pool: KVCachePool):
+    def __init__(self, pool: KVCachePool) -> None:
         self.pool = pool
         self.lru: OrderedDict = OrderedDict()
 
@@ -17,9 +17,8 @@ class NaiveCacheManager:
         """Allocate pages for a request, evicting LRU if needed."""
         while self.pool.free_count() < num_pages:
             if not self.lru:
-                raise RuntimeError(
-                    f"Cannot allocate {num_pages} pages: all pages in use"
-                )
+                msg = "Cannot allocate {} pages: all pages in use".format(num_pages)
+                raise RuntimeError(msg)
             _, old_handle = self.lru.popitem(last=False)
             self.pool.free(old_handle)
 

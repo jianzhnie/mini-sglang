@@ -7,10 +7,10 @@ Differences from Qwen2:
 
 __all__ = [
     "Qwen3Attention",
-    "Qwen3MLP",
     "Qwen3DecoderLayer",
-    "Qwen3Model",
     "Qwen3ForCausalLM",
+    "Qwen3MLP",
+    "Qwen3Model",
 ]
 import torch
 import torch.nn as nn
@@ -50,10 +50,14 @@ class Qwen3Attention(nn.Module):
 
         self.q_proj = ColumnParallelLinear(hidden_size, num_heads * head_dim, bias=True)
         self.k_proj = ColumnParallelLinear(
-            hidden_size, num_kv_heads * head_dim, bias=True
+            hidden_size,
+            num_kv_heads * head_dim,
+            bias=True,
         )
         self.v_proj = ColumnParallelLinear(
-            hidden_size, num_kv_heads * head_dim, bias=True
+            hidden_size,
+            num_kv_heads * head_dim,
+            bias=True,
         )
         self.o_proj = RowParallelLinear(num_heads * head_dim, hidden_size, bias=False)
 
@@ -127,7 +131,9 @@ class Qwen3MLP(nn.Module):
     def __init__(self, hidden_size: int, intermediate_size: int) -> None:
         super().__init__()
         self.gate_proj = ColumnParallelLinear(
-            hidden_size, intermediate_size, bias=False
+            hidden_size,
+            intermediate_size,
+            bias=False,
         )
         self.up_proj = ColumnParallelLinear(hidden_size, intermediate_size, bias=False)
         self.down_proj = RowParallelLinear(intermediate_size, hidden_size, bias=False)
@@ -195,7 +201,8 @@ class Qwen3Model(nn.Module):
         super().__init__()
         self.config = config
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size, config.hidden_size
+            config.vocab_size,
+            config.hidden_size,
         )
         self.layers = nn.ModuleList(
             [
@@ -210,7 +217,7 @@ class Qwen3Model(nn.Module):
                     config.rms_norm_eps,
                 )
                 for _ in range(config.num_layers)
-            ]
+            ],
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -248,7 +255,9 @@ class Qwen3ForCausalLM(nn.Module):
         super().__init__()
         self.model = Qwen3Model(config)
         self.lm_head = ColumnParallelLinear(
-            config.hidden_size, config.vocab_size, bias=False
+            config.hidden_size,
+            config.vocab_size,
+            bias=False,
         )
         self.config = config
 

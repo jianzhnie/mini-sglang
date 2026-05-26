@@ -1,8 +1,8 @@
 """Weight loading utilities for HuggingFace models."""
 
-__all__ = ["load_hf_weights", "shard_tensor", "load_weights_parallel"]
-import os
+__all__ = ["load_hf_weights", "load_weights_parallel", "shard_tensor"]
 from collections.abc import Iterator
+from pathlib import Path
 
 import torch
 from safetensors.torch import load_file as safe_load
@@ -13,25 +13,25 @@ from minisgl.utils.device import get_device, get_tp_rank, get_tp_size
 def _iter_hf_files(model_path: str) -> Iterator[tuple[str, str]]:
     """Yield (file_path, file_type) pairs: 'safetensors' or 'bin'."""
 
-    for fname in sorted(os.listdir(model_path)):
+    for fname in sorted(p.name for p in Path(model_path).iterdir()):
         if fname.endswith(".safetensors"):
-            yield os.path.join(model_path, fname), "safetensors"
+            yield str(Path(model_path) / fname), "safetensors"
         elif fname.endswith(".bin") and fname.startswith("pytorch_model"):
-            yield os.path.join(model_path, fname), "bin"
+            yield str(Path(model_path) / fname), "bin"
 
 
 def load_hf_weights(model_path: str) -> dict[str, torch.Tensor]:
     """Load all HF weights from a directory into a single state dict."""
     state_dict: dict[str, torch.Tensor] = {}
-    index_file = os.path.join(model_path, "model.safetensors.index.json")
+    index_file = Path(model_path) / "model.safetensors.index.json"
 
-    if os.path.exists(index_file):
+    if index_file.exists():
         import json
 
-        with open(index_file) as f:
+        with index_file.open() as f:
             index = json.load(f)
         for fname in sorted(set(index["weight_map"].values())):
-            file_path = os.path.join(model_path, fname)
+            file_path = str(Path(model_path) / fname)
             state_dict.update(safe_load(file_path))
     else:
         for file_path, ftype in _iter_hf_files(model_path):
@@ -39,14 +39,17 @@ def load_hf_weights(model_path: str) -> dict[str, torch.Tensor]:
                 state_dict.update(safe_load(file_path))
             elif ftype == "bin":
                 state_dict.update(
-                    torch.load(file_path, map_location="cpu", weights_only=True)
+                    torch.load(file_path, map_location="cpu", weights_only=True),
                 )
 
     return state_dict
 
 
 def shard_tensor(
-    tensor: torch.Tensor, dim: int, rank: int, world_size: int
+    tensor: torch.Tensor,
+    dim: int,
+    rank: int,
+    world_size: int,
 ) -> torch.Tensor:
     """Shard a tensor along the given dimension."""
     chunk_size = tensor.shape[dim] // world_size
@@ -112,7 +115,7 @@ def load_weights_parallel(
             loaded += 1
         elif param.dim() >= 2 and weight.shape[0] >= param.shape[0]:
             param.data.copy_(
-                weight[: param.shape[0]].to(device=device, dtype=param.dtype)
+                weight[: param.shape[0]].to(device=device, dtype=param.dtype),
             )
             loaded += 1
 

@@ -11,8 +11,8 @@ __all__ = [
     "LayerNorm",
     "OPTAttention",
     "OPTDecoderLayer",
-    "OPTModel",
     "OPTForCausalLM",
+    "OPTModel",
     "load_opt_weights",
 ]
 import torch
@@ -35,7 +35,7 @@ class LayerNorm(nn.Module):
         normalized_shape: int,
         eps: float = 1e-5,
         elementwise_affine: bool = True,
-    ):
+    ) -> None:
         super().__init__()
         self.normalized_shape = (normalized_shape,)
         self.eps = eps
@@ -69,16 +69,24 @@ class OPTAttention(nn.Module):
         self.num_local_heads = num_heads // self.tp_size
 
         self.q_proj = ColumnParallelLinear(
-            hidden_size, num_heads * self.head_dim, bias=bias
+            hidden_size,
+            num_heads * self.head_dim,
+            bias=bias,
         )
         self.k_proj = ColumnParallelLinear(
-            hidden_size, num_heads * self.head_dim, bias=bias
+            hidden_size,
+            num_heads * self.head_dim,
+            bias=bias,
         )
         self.v_proj = ColumnParallelLinear(
-            hidden_size, num_heads * self.head_dim, bias=bias
+            hidden_size,
+            num_heads * self.head_dim,
+            bias=bias,
         )
         self.out_proj = RowParallelLinear(
-            num_heads * self.head_dim, hidden_size, bias=bias
+            num_heads * self.head_dim,
+            hidden_size,
+            bias=bias,
         )
 
     def forward(
@@ -137,7 +145,10 @@ class OPTDecoderLayer(nn.Module):
     """Single OPT decoder layer: LN -> Attention -> LN -> FFN(ReLU)."""
 
     def __init__(
-        self, hidden_size: int, num_heads: int, intermediate_size: int
+        self,
+        hidden_size: int,
+        num_heads: int,
+        intermediate_size: int,
     ) -> None:
         super().__init__()
         self.self_attn = OPTAttention(hidden_size, num_heads, bias=True)
@@ -167,8 +178,7 @@ class OPTDecoderLayer(nn.Module):
         normed = self.final_layer_norm(hidden_states)
         hidden_states = F.relu(self.fc1(normed))
         hidden_states = self.fc2(hidden_states)
-        hidden_states = hidden_states + residual
-        return hidden_states
+        return hidden_states + residual
 
 
 class OPTModel(nn.Module):
@@ -178,10 +188,12 @@ class OPTModel(nn.Module):
         super().__init__()
         self.config = config
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size, config.hidden_size
+            config.vocab_size,
+            config.hidden_size,
         )
         self.embed_positions = nn.Embedding(
-            config.max_position_embeddings, config.hidden_size
+            config.max_position_embeddings,
+            config.hidden_size,
         )
         self.layers = nn.ModuleList(
             [
@@ -191,7 +203,7 @@ class OPTModel(nn.Module):
                     config.intermediate_size,
                 )
                 for _ in range(config.num_layers)
-            ]
+            ],
         )
         self.final_layer_norm = LayerNorm(config.hidden_size)
 
@@ -232,7 +244,9 @@ class OPTForCausalLM(nn.Module):
         super().__init__()
         self.model = OPTModel(config)
         self.lm_head = ColumnParallelLinear(
-            config.hidden_size, config.vocab_size, bias=False
+            config.hidden_size,
+            config.vocab_size,
+            bias=False,
         )
         self.config = config
 
@@ -250,6 +264,7 @@ class OPTForCausalLM(nn.Module):
 
 def load_opt_weights(model: OPTForCausalLM, state_dict: dict) -> None:
     """Load OPT weights with HF key remapping."""
+
     params = dict(model.named_parameters())
 
     for hf_name, weight in state_dict.items():

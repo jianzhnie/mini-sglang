@@ -1,6 +1,6 @@
 """Tokenizer worker process: handles token encode/decode via ZMQ."""
 
-__all__ = ["TokenizeMsg", "DetokenizeMsg", "UserMsg", "TokenizerWorker"]
+__all__ = ["DetokenizeMsg", "TokenizeMsg", "TokenizerWorker", "UserMsg"]
 from dataclasses import dataclass
 
 from minisgl.utils.logger import logger
@@ -34,7 +34,7 @@ class TokenizerWorker:
     version is used by default.
     """
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str) -> None:
         from transformers import AutoTokenizer
 
         logger.info(f"Loading tokenizer from {model_path}")
@@ -56,7 +56,9 @@ class TokenizerWorker:
         )
 
     def apply_chat_template(
-        self, messages: list[dict], add_generation_prompt: bool = True
+        self,
+        messages: list[dict],
+        add_generation_prompt: bool = True,
     ) -> str:
         """Apply the model's chat template, with fallback for models without one."""
         if hasattr(self.tokenizer, "chat_template") and self.tokenizer.chat_template:

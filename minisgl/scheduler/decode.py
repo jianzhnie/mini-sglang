@@ -22,7 +22,7 @@ class DecodeManager:
         args: ServerArgs,
         pool: KVCachePool,
         radix_cache: RadixCacheManager,
-    ):
+    ) -> None:
         self.max_running_req = args.max_running_req
         self.page_size = args.page_size
         self.pool = pool

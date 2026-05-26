@@ -5,7 +5,7 @@ Usage:
     python -m minisgl --model-path Qwen/Qwen2-0.5B-Instruct --shell
 """
 
-__all__ = ["parse_args", "run_server", "run_shell", "main"]
+__all__ = ["main", "parse_args", "run_server", "run_shell"]
 import argparse
 
 from minisgl.config import ModelArgs, ServerArgs
@@ -18,15 +18,21 @@ from minisgl.utils.logger import setup_logger
 
 def parse_args() -> ServerArgs:
     parser = argparse.ArgumentParser(
-        description="Mini-SGLang: Lightweight LLM Inference"
+        description="Mini-SGLang: Lightweight LLM Inference",
     )
     parser.add_argument(
-        "--model-path", type=str, required=True, help="Path to HF model"
+        "--model-path",
+        type=str,
+        required=True,
+        help="Path to HF model",
     )
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
-        "--tp-size", type=int, default=1, help="Tensor parallelism size"
+        "--tp-size",
+        type=int,
+        default=1,
+        help="Tensor parallelism size",
     )
     parser.add_argument(
         "--memory-ratio",
@@ -67,7 +73,9 @@ def parse_args() -> ServerArgs:
         help="Trust remote code for HF models",
     )
     parser.add_argument(
-        "--shell", action="store_true", help="Interactive CLI shell mode"
+        "--shell",
+        action="store_true",
+        help="Interactive CLI shell mode",
     )
     parser.add_argument("--log-level", type=str, default="INFO")
     return ServerArgs(**vars(parser.parse_args()))

@@ -1,13 +1,13 @@
 """Device and distributed initialization utilities."""
 
 __all__ = [
+    "barrier",
+    "get_device",
     "get_tp_rank",
     "get_tp_size",
-    "get_device",
-    "set_device",
     "init_distributed",
     "is_distributed",
-    "barrier",
+    "set_device",
 ]
 import os
 

@@ -7,10 +7,10 @@ Qwen3MoEForCausalLM:
 """
 
 __all__ = [
-    "Qwen3MoEMLP",
     "Qwen3MoEDecoderLayer",
-    "Qwen3MoEModel",
     "Qwen3MoEForCausalLM",
+    "Qwen3MoEMLP",
+    "Qwen3MoEModel",
 ]
 import torch
 import torch.nn as nn
@@ -55,13 +55,19 @@ class Qwen3MoEMLP(nn.Module):
 
         # Shared experts
         self.shared_gate = ColumnParallelLinear(
-            hidden_size, moe_intermediate_size, bias=False
+            hidden_size,
+            moe_intermediate_size,
+            bias=False,
         )
         self.shared_up = ColumnParallelLinear(
-            hidden_size, moe_intermediate_size, bias=False
+            hidden_size,
+            moe_intermediate_size,
+            bias=False,
         )
         self.shared_down = RowParallelLinear(
-            moe_intermediate_size, hidden_size, bias=False
+            moe_intermediate_size,
+            hidden_size,
+            bias=False,
         )
 
         # Routed experts: gate_proj, up_proj, down_proj per expert
@@ -69,13 +75,13 @@ class Qwen3MoEMLP(nn.Module):
         experts_per_rank = moe_intermediate_size // tp_size
 
         self.expert_gate = nn.Parameter(
-            torch.empty(self.num_local_experts, experts_per_rank, hidden_size)
+            torch.empty(self.num_local_experts, experts_per_rank, hidden_size),
         )
         self.expert_up = nn.Parameter(
-            torch.empty(self.num_local_experts, experts_per_rank, hidden_size)
+            torch.empty(self.num_local_experts, experts_per_rank, hidden_size),
         )
         self.expert_down = nn.Parameter(
-            torch.empty(self.num_local_experts, hidden_size, experts_per_rank)
+            torch.empty(self.num_local_experts, hidden_size, experts_per_rank),
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -84,13 +90,15 @@ class Qwen3MoEMLP(nn.Module):
 
         # Shared expert output
         shared_out = self.shared_down(
-            F.silu(self.shared_gate(flat)) * self.shared_up(flat)
+            F.silu(self.shared_gate(flat)) * self.shared_up(flat),
         )
 
         # Router: compute expert weights
         router_logits = self.router(flat)  # (total_tokens, num_experts)
         router_weights, selected_experts = torch.topk(
-            router_logits, self.num_experts_per_tok, dim=-1
+            router_logits,
+            self.num_experts_per_tok,
+            dim=-1,
         )
         router_weights = F.softmax(router_weights, dim=-1)
 
@@ -120,7 +128,8 @@ class Qwen3MoEMLP(nn.Module):
                 1
             ]
             weights = router_weights[mask][
-                torch.arange(len(weight_idx)), weight_idx
+                torch.arange(len(weight_idx)),
+                weight_idx,
             ].unsqueeze(-1)
 
             # Expert computation: SiLU(gate) * up, then down
@@ -164,7 +173,8 @@ class Qwen3MoEDecoderLayer(nn.Module):
 
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
+            config.hidden_size,
+            eps=config.rms_norm_eps,
         )
 
     def forward(
@@ -200,7 +210,8 @@ class Qwen3MoEModel(nn.Module):
 
         self.config = config
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size, config.hidden_size
+            config.vocab_size,
+            config.hidden_size,
         )
 
         decoder_sparse_step = config.decoder_sparse_step or 1
@@ -211,7 +222,7 @@ class Qwen3MoEModel(nn.Module):
                     is_moe_layer=(i % decoder_sparse_step == decoder_sparse_step - 1),
                 )
                 for i in range(config.num_layers)
-            ]
+            ],
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -249,7 +260,9 @@ class Qwen3MoEForCausalLM(nn.Module):
         super().__init__()
         self.model = Qwen3MoEModel(config)
         self.lm_head = ColumnParallelLinear(
-            config.hidden_size, config.vocab_size, bias=False
+            config.hidden_size,
+            config.vocab_size,
+            bias=False,
         )
         self.config = config
 

@@ -8,10 +8,10 @@ Qwen2ForCausalLM architecture:
 
 __all__ = [
     "Qwen2Attention",
-    "Qwen2MLP",
     "Qwen2DecoderLayer",
-    "Qwen2Model",
     "Qwen2ForCausalLM",
+    "Qwen2MLP",
+    "Qwen2Model",
 ]
 import torch
 import torch.nn as nn
@@ -50,10 +50,14 @@ class Qwen2Attention(nn.Module):
 
         self.q_proj = ColumnParallelLinear(hidden_size, num_heads * head_dim, bias=True)
         self.k_proj = ColumnParallelLinear(
-            hidden_size, num_kv_heads * head_dim, bias=True
+            hidden_size,
+            num_kv_heads * head_dim,
+            bias=True,
         )
         self.v_proj = ColumnParallelLinear(
-            hidden_size, num_kv_heads * head_dim, bias=True
+            hidden_size,
+            num_kv_heads * head_dim,
+            bias=True,
         )
         self.o_proj = RowParallelLinear(num_heads * head_dim, hidden_size, bias=False)
 
@@ -125,7 +129,9 @@ class Qwen2MLP(nn.Module):
     def __init__(self, hidden_size: int, intermediate_size: int) -> None:
         super().__init__()
         self.gate_proj = ColumnParallelLinear(
-            hidden_size, intermediate_size, bias=False
+            hidden_size,
+            intermediate_size,
+            bias=False,
         )
         self.up_proj = ColumnParallelLinear(hidden_size, intermediate_size, bias=False)
         self.down_proj = RowParallelLinear(intermediate_size, hidden_size, bias=False)
@@ -194,7 +200,8 @@ class Qwen2Model(nn.Module):
         super().__init__()
         self.config = config
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size, config.hidden_size
+            config.vocab_size,
+            config.hidden_size,
         )
         self.layers = nn.ModuleList(
             [
@@ -209,7 +216,7 @@ class Qwen2Model(nn.Module):
                     config.rms_norm_eps,
                 )
                 for _ in range(config.num_layers)
-            ]
+            ],
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -266,6 +273,7 @@ class Qwen2ForCausalLM(nn.Module):
 
     def tie_weights(self, state_dict: dict) -> None:
         """Tie lm_head weight with embed_tokens if config says so."""
+
         if self.config.tie_word_embeddings:
             # Find embed_tokens weight
             embed_key = "model.embed_tokens.weight"

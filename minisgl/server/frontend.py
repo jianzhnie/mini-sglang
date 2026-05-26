@@ -54,7 +54,9 @@ class CompletionRequest(BaseModel):
 class FrontendManager:
     """Manages the lifecycle of inference requests and SSE streaming."""
 
-    def __init__(self, server_args: ServerArgs, scheduler: Scheduler, tokenizer_worker):
+    def __init__(
+        self, server_args: ServerArgs, scheduler: Scheduler, tokenizer_worker
+    ) -> None:
         self.args = server_args
         self.scheduler = scheduler
         self.tokenizer = tokenizer_worker
@@ -86,7 +88,7 @@ class FrontendManager:
             for uid, token_id, finished in step_results:
                 if uid in self._results:
                     self._results[uid].put((token_id, finished))
-        except Exception as e:
+        except (RuntimeError, ValueError) as e:
             logger.error(f"Scheduler step error: {e}")
 
     def run_event_loop(self) -> None:
@@ -111,7 +113,9 @@ _frontend: FrontendManager | None = None
 
 
 def init_frontend(
-    server_args: ServerArgs, scheduler: Scheduler, tokenizer_worker
+    server_args: ServerArgs,
+    scheduler: Scheduler,
+    tokenizer_worker,
 ) -> FrontendManager:
     global _frontend
     _frontend = FrontendManager(server_args, scheduler, tokenizer_worker)
@@ -149,29 +153,29 @@ async def chat_completions(request: ChatCompletionRequest):
             _stream_chat_response(uid, result_queue, request.model),
             media_type="text/event-stream",
         )
-    else:
-        # Collect all tokens for non-streaming
-        generated_tokens = []
-        while True:
-            token_id, finished = result_queue.get()
-            generated_tokens.append(token_id)
-            if finished:
-                break
 
-        text = _frontend.tokenizer.tokenizer.decode(generated_tokens)
-        _frontend.remove_result(uid)
-        return {
-            "id": f"chatcmpl-{uid}",
-            "object": "chat.completion",
-            "model": request.model,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": text},
-                    "finish_reason": "stop",
-                }
-            ],
-        }
+    # Collect all tokens for non-streaming
+    generated_tokens = []
+    while True:
+        token_id, finished = result_queue.get()
+        generated_tokens.append(token_id)
+        if finished:
+            break
+
+    text = _frontend.tokenizer.tokenizer.decode(generated_tokens)
+    _frontend.remove_result(uid)
+    return {
+        "id": f"chatcmpl-{uid}",
+        "object": "chat.completion",
+        "model": request.model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": "stop",
+            }
+        ],
+    }
 
 
 def _stream_chat_response(uid: int, result_queue: queue.Queue, model: str):
@@ -226,21 +230,21 @@ async def completions(request: CompletionRequest):
             _stream_completion_response(uid, result_queue, request.model),
             media_type="text/event-stream",
         )
-    else:
-        generated_tokens = []
-        while True:
-            token_id, finished = result_queue.get()
-            generated_tokens.append(token_id)
-            if finished:
-                break
-        text = _frontend.tokenizer.tokenizer.decode(generated_tokens)
-        _frontend.remove_result(uid)
-        return {
-            "id": f"cmpl-{uid}",
-            "object": "text_completion",
-            "model": request.model,
-            "choices": [{"index": 0, "text": text, "finish_reason": "stop"}],
-        }
+
+    generated_tokens = []
+    while True:
+        token_id, finished = result_queue.get()
+        generated_tokens.append(token_id)
+        if finished:
+            break
+    text = _frontend.tokenizer.tokenizer.decode(generated_tokens)
+    _frontend.remove_result(uid)
+    return {
+        "id": f"cmpl-{uid}",
+        "object": "text_completion",
+        "model": request.model,
+        "choices": [{"index": 0, "text": text, "finish_reason": "stop"}],
+    }
 
 
 def _stream_completion_response(uid: int, result_queue: queue.Queue, model: str):

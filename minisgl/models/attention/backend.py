@@ -71,15 +71,33 @@ class AttentionBackend:
 
         if "fi" in backend and _FLASHINFER_AVAILABLE:
             return FlashInferBackend.forward(
-                q, k, v, k_cache, v_cache, write_loc, **kwargs
+                q,
+                k,
+                v,
+                k_cache,
+                v_cache,
+                write_loc,
+                **kwargs,
             )
         elif _FLASH_ATTN_AVAILABLE:
             return FlashAttentionBackend.forward(
-                q, k, v, k_cache, v_cache, write_loc, **kwargs
+                q,
+                k,
+                v,
+                k_cache,
+                v_cache,
+                write_loc,
+                **kwargs,
             )
         else:
             return PyTorchBackend.forward(
-                q, k, v, k_cache, v_cache, write_loc, **kwargs
+                q,
+                k,
+                v,
+                k_cache,
+                v_cache,
+                write_loc,
+                **kwargs,
             )
 
 
@@ -97,7 +115,8 @@ class FlashAttentionBackend:
         **kwargs,
     ) -> torch.Tensor:
         if not _FLASH_ATTN_AVAILABLE:
-            raise RuntimeError("flash-attn not installed")
+            msg = "flash-attn not installed"
+            raise RuntimeError(msg)
 
         batch, num_heads, seq_len, head_dim = q.shape
 
@@ -149,10 +168,17 @@ class FlashInferBackend:
         **kwargs,
     ) -> torch.Tensor:
         if not _FLASHINFER_AVAILABLE:
-            raise RuntimeError("flashinfer not installed")
+            msg = "flashinfer not installed"
+            raise RuntimeError(msg)
         # Use flash_attn as fallback for now
         return FlashAttentionBackend.forward(
-            q, k, v, k_cache, v_cache, write_loc, **kwargs
+            q,
+            k,
+            v,
+            k_cache,
+            v_cache,
+            write_loc,
+            **kwargs,
         )
 
 

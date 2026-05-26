@@ -18,7 +18,7 @@ class Scheduler:
     2. Decode: Generate one token per running request
     """
 
-    def __init__(self, server_args: ServerArgs, engine: Engine):
+    def __init__(self, server_args: ServerArgs, engine: Engine) -> None:
         self.args = server_args
         self.engine = engine
         self.device = engine.device
@@ -34,11 +34,11 @@ class Scheduler:
     def _load_eos_token(self) -> int:
         """Load EOS token ID from model's tokenizer config."""
         import json
-        import os
+        from pathlib import Path
 
-        path = os.path.join(self.args.model_path, "generation_config.json")
+        path = Path(self.args.model_path) / "generation_config.json"
         try:
-            with open(path) as f:
+            with path.open() as f:
                 cfg = json.load(f)
             return cfg.get("eos_token_id", 151643)
         except FileNotFoundError:
@@ -85,8 +85,7 @@ class Scheduler:
                     if (
                         token_id == self.eos_token_id
                         and not req.sampling_params.ignore_eos
-                        or req.output_len >= req.sampling_params.max_tokens
-                    ):
+                    ) or req.output_len >= req.sampling_params.max_tokens:
                         finished = True
                         req.status = SequenceStatus.FINISHED
                         self.prefill_manager.remove_finished(req)

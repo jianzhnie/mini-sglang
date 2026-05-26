@@ -1,6 +1,6 @@
 """Sequence (request) and Batch data structures for the scheduler."""
 
-__all__ = ["SequenceStatus", "Req", "Batch"]
+__all__ = ["Batch", "Req", "SequenceStatus"]
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Literal

@@ -7,10 +7,10 @@ Differences from Llama:
 
 __all__ = [
     "MistralAttention",
-    "MistralMLP",
     "MistralDecoderLayer",
-    "MistralModel",
     "MistralForCausalLM",
+    "MistralMLP",
+    "MistralModel",
 ]
 import torch
 import torch.nn as nn
@@ -49,13 +49,19 @@ class MistralAttention(nn.Module):
         self.num_local_kv_heads = max(1, num_kv_heads // self.tp_size)
 
         self.q_proj = ColumnParallelLinear(
-            hidden_size, num_heads * head_dim, bias=False
+            hidden_size,
+            num_heads * head_dim,
+            bias=False,
         )
         self.k_proj = ColumnParallelLinear(
-            hidden_size, num_kv_heads * head_dim, bias=False
+            hidden_size,
+            num_kv_heads * head_dim,
+            bias=False,
         )
         self.v_proj = ColumnParallelLinear(
-            hidden_size, num_kv_heads * head_dim, bias=False
+            hidden_size,
+            num_kv_heads * head_dim,
+            bias=False,
         )
         self.o_proj = RowParallelLinear(num_heads * head_dim, hidden_size, bias=False)
 
@@ -129,7 +135,9 @@ class MistralMLP(nn.Module):
     def __init__(self, hidden_size: int, intermediate_size: int) -> None:
         super().__init__()
         self.gate_proj = ColumnParallelLinear(
-            hidden_size, intermediate_size, bias=False
+            hidden_size,
+            intermediate_size,
+            bias=False,
         )
         self.up_proj = ColumnParallelLinear(hidden_size, intermediate_size, bias=False)
         self.down_proj = RowParallelLinear(intermediate_size, hidden_size, bias=False)
@@ -198,7 +206,8 @@ class MistralModel(nn.Module):
         super().__init__()
         self.config = config
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size, config.hidden_size
+            config.vocab_size,
+            config.hidden_size,
         )
         self.layers = nn.ModuleList(
             [
@@ -214,7 +223,7 @@ class MistralModel(nn.Module):
                     config.sliding_window,
                 )
                 for _ in range(config.num_layers)
-            ]
+            ],
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -252,7 +261,9 @@ class MistralForCausalLM(nn.Module):
         super().__init__()
         self.model = MistralModel(config)
         self.lm_head = ColumnParallelLinear(
-            config.hidden_size, config.vocab_size, bias=False
+            config.hidden_size,
+            config.vocab_size,
+            bias=False,
         )
         self.config = config
 
