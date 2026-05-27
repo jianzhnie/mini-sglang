@@ -211,3 +211,4 @@ __marimo__/
 .claude/command-log.txt
 .claude/stop-failure.log
 .claude/skills/gstack
+.codegraph
