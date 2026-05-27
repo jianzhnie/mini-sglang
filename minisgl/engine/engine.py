@@ -79,6 +79,8 @@ class Engine:
                 remap_fn=remap_fn,
             )
             logger.info(f"Loaded {loaded} weights (model_type={model_type})")
+            if hasattr(self.model, "tie_weights"):
+                self.model.tie_weights(state_dict)
 
         self.kv_cache_pool = self._allocate_kv_cache()
         self._assign_kv_cache()

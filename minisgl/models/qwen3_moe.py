@@ -149,7 +149,15 @@ class Qwen3MoEDecoderLayer(nn.Module):
         super().__init__()
         from minisgl.models.qwen3 import Qwen3Attention, Qwen3MLP
 
-        self.self_attn = Qwen3Attention(config)
+        self.self_attn = Qwen3Attention(
+            config.hidden_size,
+            config.num_attention_heads,
+            config.num_kv_heads,
+            config.head_dim,
+            config.max_position_embeddings,
+            config.rope_theta,
+            config.rms_norm_eps,
+        )
 
         if is_moe_layer:
             self.mlp = Qwen3MoEMLP(

@@ -48,7 +48,9 @@ class TokenizerWorker:
         """Encode text to token IDs."""
         return self.tokenizer.encode(text, add_special_tokens=True)
 
-    def decode(self, token_id: int | list[int], skip_special_tokens: bool = True) -> str:
+    def decode(
+        self, token_id: int | list[int], skip_special_tokens: bool = True
+    ) -> str:
         """Decode token ID(s) to text.
 
         Accepts a single token ID (int) for streaming or a list of token IDs

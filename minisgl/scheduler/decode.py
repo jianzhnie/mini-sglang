@@ -79,9 +79,7 @@ class DecodeManager:
                     if j < max_blocks:
                         block_table[i, j] = pid
 
-        batch.write_loc = torch.tensor(
-            write_loc, dtype=torch.int32, device=self.device
-        )
+        batch.write_loc = torch.tensor(write_loc, dtype=torch.int32, device=self.device)
         batch.cache_seqlens = torch.tensor(
             cache_seqlens, dtype=torch.int32, device=self.device
         )

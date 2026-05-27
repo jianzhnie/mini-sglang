@@ -70,15 +70,33 @@ class AttentionBackend:
 
         if "fi" in backend and _FLASHINFER_AVAILABLE:
             return FlashInferBackend.forward(
-                q, k, v, k_cache, v_cache, write_loc, **kwargs,
+                q,
+                k,
+                v,
+                k_cache,
+                v_cache,
+                write_loc,
+                **kwargs,
             )
         elif _FLASH_ATTN_AVAILABLE:
             return FlashAttentionBackend.forward(
-                q, k, v, k_cache, v_cache, write_loc, **kwargs,
+                q,
+                k,
+                v,
+                k_cache,
+                v_cache,
+                write_loc,
+                **kwargs,
             )
         else:
             return PyTorchBackend.forward(
-                q, k, v, k_cache, v_cache, write_loc, **kwargs,
+                q,
+                k,
+                v,
+                k_cache,
+                v_cache,
+                write_loc,
+                **kwargs,
             )
 
 
@@ -170,7 +188,13 @@ class FlashInferBackend:
             msg = "flashinfer not installed"
             raise RuntimeError(msg)
         return FlashAttentionBackend.forward(
-            q, k, v, k_cache, v_cache, write_loc, **kwargs,
+            q,
+            k,
+            v,
+            k_cache,
+            v_cache,
+            write_loc,
+            **kwargs,
         )
 
 
@@ -205,8 +229,13 @@ class PyTorchBackend:
             )
 
         return F.scaled_dot_product_attention(
-            q, k, v,
-            attn_mask=None, dropout_p=0.0, is_causal=True, scale=scale,
+            q,
+            k,
+            v,
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=True,
+            scale=scale,
         )
 
     @staticmethod
@@ -225,8 +254,13 @@ class PyTorchBackend:
 
         if req_to_token is None or cache_seqlens is None:
             return F.scaled_dot_product_attention(
-                q, q, q,
-                attn_mask=None, dropout_p=0.0, is_causal=True, scale=scale,
+                q,
+                q,
+                q,
+                attn_mask=None,
+                dropout_p=0.0,
+                is_causal=True,
+                scale=scale,
             )
 
         batch_size = q.shape[0]
@@ -255,7 +289,12 @@ class PyTorchBackend:
         gathered_v = gathered_v.transpose(1, 2)
 
         output = F.scaled_dot_product_attention(
-            q, gathered_k, gathered_v,
-            attn_mask=None, dropout_p=0.0, is_causal=False, scale=scale,
+            q,
+            gathered_k,
+            gathered_v,
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=False,
+            scale=scale,
         )
         return output
