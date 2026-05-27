@@ -2,11 +2,14 @@
 
 Usage:
     from minisgl import LLM
-    llm = LLM(model_path="Qwen/Qwen2-0.5B-Instruct")
-    output = llm.generate(["Hello, world!", "What is AI?"])
+    with LLM(model_path="Qwen/Qwen2-0.5B-Instruct") as llm:
+        output = llm.generate(["Hello, world!", "What is AI?"])
 """
 
 __all__ = ["LLM"]
+import contextlib
+import time
+
 from minisgl.config import ModelArgs, SamplingParams, ServerArgs
 from minisgl.engine.engine import Engine
 from minisgl.models.tokenizer.worker import TokenizerWorker
@@ -15,7 +18,10 @@ from minisgl.utils.logger import logger
 
 
 class LLM:
-    """High-level API for offline LLM inference."""
+    """High-level API for offline LLM inference.
+
+    Supports context manager protocol for automatic resource cleanup.
+    """
 
     def __init__(
         self,
@@ -47,6 +53,21 @@ class LLM:
         self.tokenizer = TokenizerWorker(model_path)
 
         logger.info("LLM ready")
+
+    def __enter__(self) -> "LLM":
+        return self
+
+    def __exit__(self, *args) -> None:
+        self.cleanup()
+
+    def cleanup(self) -> None:
+        """Release engine resources."""
+        with contextlib.suppress(Exception):
+            self.engine.cleanup()
+
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self.cleanup()
 
     def generate(
         self,
@@ -81,17 +102,22 @@ class LLM:
         results: list[str] = []
         uid_to_idx = {}
 
-        # Submit all requests
         for i, prompt in enumerate(prompt_list):
             input_ids = self.tokenizer.encode(prompt)
             uid = self.scheduler.add_request(input_ids, sampling_params)
             uid_to_idx[uid] = i
             results.append("")
 
-        # Run inference loop
         pending_uids = set(uid_to_idx.keys())
+        idle_steps = 0
         while pending_uids:
             step_results = self.scheduler.step()
+            if not step_results:
+                idle_steps += 1
+                if idle_steps > 100:
+                    time.sleep(0.001)
+                continue
+            idle_steps = 0
             for uid, token_id, finished in step_results:
                 if uid in pending_uids:
                     idx = uid_to_idx[uid]

@@ -167,7 +167,7 @@ async def chat_completions(request: ChatCompletionRequest):
 
     await asyncio.to_thread(_collect_tokens)
 
-    text = _frontend.tokenizer.tokenizer.decode(generated_tokens)
+    text = _frontend.tokenizer.decode(generated_tokens)
     _frontend.remove_result(uid)
     return {
         "id": f"chatcmpl-{uid}",
@@ -246,7 +246,7 @@ async def completions(request: CompletionRequest):
                 break
 
     await asyncio.to_thread(_collect_tokens)
-    text = _frontend.tokenizer.tokenizer.decode(generated_tokens)
+    text = _frontend.tokenizer.decode(generated_tokens)
     _frontend.remove_result(uid)
     return {
         "id": f"cmpl-{uid}",

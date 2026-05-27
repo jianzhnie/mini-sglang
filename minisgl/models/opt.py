@@ -118,11 +118,14 @@ class OPTDecoderLayer(nn.Module):
         k_cache: torch.Tensor | None = None,
         v_cache: torch.Tensor | None = None,
         write_loc: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
         if residual is None:
             residual = hidden_states
         normed = self.self_attn_layer_norm(hidden_states)
-        attn_out = self.self_attn(normed, positions, k_cache, v_cache, write_loc)
+        attn_out = self.self_attn(
+            normed, positions, k_cache, v_cache, write_loc, **kwargs
+        )
         hidden_states = attn_out + residual
 
         residual = hidden_states
@@ -164,6 +167,7 @@ class OPTModel(nn.Module):
         k_cache: torch.Tensor | None = None,
         v_cache: torch.Tensor | None = None,
         write_loc: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         pos_emb = self.embed_positions(positions)
@@ -180,6 +184,7 @@ class OPTModel(nn.Module):
                 layer_k_cache,
                 layer_v_cache,
                 write_loc,
+                **kwargs,
             )
 
         hidden_states = self.final_layer_norm(hidden_states)
@@ -204,8 +209,11 @@ class OPTForCausalLM(nn.Module):
         k_cache: torch.Tensor | None = None,
         v_cache: torch.Tensor | None = None,
         write_loc: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, k_cache, v_cache, write_loc)
+        hidden_states = self.model(
+            input_ids, positions, k_cache, v_cache, write_loc, **kwargs
+        )
         return self.lm_head(hidden_states)
 
 

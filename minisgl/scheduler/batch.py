@@ -59,6 +59,9 @@ class Batch:
     positions: torch.Tensor | None = None  # (total_tokens,)
     write_loc: torch.Tensor | None = None  # (total_tokens,) page table indices
     req_to_token: torch.Tensor | None = None  # (num_reqs, max_seq_len) page table
+    cu_seqlens_q: torch.Tensor | None = None  # (num_reqs+1,) varlen boundaries
+    block_table: torch.Tensor | None = None  # (num_reqs, max_blocks) page indices
+    cache_seqlens: torch.Tensor | None = None  # (num_reqs,) cached token counts
 
     def size(self) -> int:
         return len(self.reqs)

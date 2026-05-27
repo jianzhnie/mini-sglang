@@ -2,7 +2,7 @@
 
 Supports:
 - FlashAttention (fa): General-purpose, good compatibility
-- FlashInfer (fi): Optimized for prefill/decode separation
+- FlashInfer (fi): Optimized for prefill/decode separation (not yet implemented)
 - Hybrid (fa,fi): FlashAttention for prefill, FlashInfer for decode
 """
 
@@ -17,7 +17,6 @@ import math
 import torch
 import torch.nn.functional as F
 
-# Try importing optional backends
 _FLASH_ATTN_AVAILABLE = False
 _FLASHINFER_AVAILABLE = False
 flash_attn_varlen_func = None
@@ -71,33 +70,15 @@ class AttentionBackend:
 
         if "fi" in backend and _FLASHINFER_AVAILABLE:
             return FlashInferBackend.forward(
-                q,
-                k,
-                v,
-                k_cache,
-                v_cache,
-                write_loc,
-                **kwargs,
+                q, k, v, k_cache, v_cache, write_loc, **kwargs,
             )
         elif _FLASH_ATTN_AVAILABLE:
             return FlashAttentionBackend.forward(
-                q,
-                k,
-                v,
-                k_cache,
-                v_cache,
-                write_loc,
-                **kwargs,
+                q, k, v, k_cache, v_cache, write_loc, **kwargs,
             )
         else:
             return PyTorchBackend.forward(
-                q,
-                k,
-                v,
-                k_cache,
-                v_cache,
-                write_loc,
-                **kwargs,
+                q, k, v, k_cache, v_cache, write_loc, **kwargs,
             )
 
 
@@ -122,39 +103,36 @@ class FlashAttentionBackend:
 
         # Decode: use paged KV cache
         if seq_len == 1 and k_cache is not None and v_cache is not None:
+            cache_seqlens = kwargs.get("cache_seqlens")
+            block_table = kwargs.get("block_table")
             return flash_attn_with_kvcache(
                 q.transpose(1, 2),
                 k_cache,
                 v_cache,
-                cache_seqlens=None,
+                block_table=block_table,
+                cache_seqlens=cache_seqlens,
                 softmax_scale=1.0 / math.sqrt(head_dim),
                 causal=True,
             ).transpose(1, 2)
 
         # Prefill: flash attention with varlen
-        # Handle multiple requests by computing proper cu_seqlens
-        # q shape: (batch, num_heads, total_seq, head_dim) after batch-flatten
         q_flat = q.transpose(1, 2).reshape(-1, num_heads, head_dim)
         k_flat = k.transpose(1, 2).reshape(-1, num_heads, head_dim)
         v_flat = v.transpose(1, 2).reshape(-1, num_heads, head_dim)
 
-        # Build cu_seqlens: cumulative token counts per request
-        # When batch>1 and each request has different seq_len, need proper boundaries
-        total_tokens = q_flat.shape[0]
-        tokens_per_req = total_tokens // batch
-        cu_seqlens = torch.arange(
-            0, total_tokens + 1, tokens_per_req, dtype=torch.int32, device=q.device
-        )
-        # Ensure last element matches total_tokens
-        if cu_seqlens[-1] != total_tokens:
-            cu_seqlens = torch.cat(
-                [
-                    cu_seqlens,
-                    torch.tensor([total_tokens], dtype=torch.int32, device=q.device),
-                ]
+        cu_seqlens_q = kwargs.get("cu_seqlens_q")
+        if cu_seqlens_q is not None:
+            cu_seqlens_q = cu_seqlens_q.to(dtype=torch.int32, device=q.device)
+        else:
+            total_tokens = q_flat.shape[0]
+            cu_seqlens_q = torch.tensor(
+                [0, total_tokens], dtype=torch.int32, device=q.device
             )
+
         max_seqlen = (
-            int(cu_seqlens[1:].max().item()) if len(cu_seqlens) > 1 else total_tokens
+            int((cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max().item())
+            if len(cu_seqlens_q) > 1
+            else q_flat.shape[0]
         )
 
         out = flash_attn_varlen_func(
@@ -162,9 +140,9 @@ class FlashAttentionBackend:
             k_flat,
             v_flat,
             max_seqlen_q=max_seqlen,
-            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_q=cu_seqlens_q,
             max_seqlen_k=max_seqlen,
-            cu_seqlens_k=cu_seqlens,
+            cu_seqlens_k=cu_seqlens_q,
             softmax_scale=1.0 / math.sqrt(head_dim),
             causal=True,
         )
@@ -172,7 +150,11 @@ class FlashAttentionBackend:
 
 
 class FlashInferBackend:
-    """FlashInfer-based attention with paged KV cache."""
+    """FlashInfer-based attention with paged KV cache.
+
+    TODO: Implement FlashInfer decode path with proper page table support.
+    Currently falls back to FlashAttention.
+    """
 
     @staticmethod
     def forward(
@@ -187,15 +169,8 @@ class FlashInferBackend:
         if not _FLASHINFER_AVAILABLE:
             msg = "flashinfer not installed"
             raise RuntimeError(msg)
-        # Use flash_attn as fallback for now
         return FlashAttentionBackend.forward(
-            q,
-            k,
-            v,
-            k_cache,
-            v_cache,
-            write_loc,
-            **kwargs,
+            q, k, v, k_cache, v_cache, write_loc, **kwargs,
         )
 
 
@@ -215,27 +190,20 @@ class PyTorchBackend:
         batch, num_heads, seq_len, head_dim = q.shape
         scale = 1.0 / math.sqrt(head_dim)
 
-        # Handle GQA: repeat KV heads to match Q heads
         num_kv_heads = k.shape[1]
         if num_heads != num_kv_heads:
             k = k.repeat_interleave(num_heads // num_kv_heads, dim=1)
             v = v.repeat_interleave(num_heads // num_kv_heads, dim=1)
 
-        # Decode with KV cache: gather cached K/V and concatenate
+        # Decode with KV cache
         if seq_len == 1 and k_cache is not None and v_cache is not None:
-            # k_cache: (num_pages, page_size, num_kv_heads, head_dim)
-            # Expand KV heads to match Q heads
             num_kv_h = k_cache.shape[2]
             if num_heads != num_kv_h:
                 k_cache = k_cache.repeat_interleave(num_heads // num_kv_h, dim=2)
                 v_cache = v_cache.repeat_interleave(num_heads // num_kv_h, dim=2)
 
-            # Use a simple approach: just use current K and V
-            # (Proper paged cache access requires block table traversal)
             return F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
+                q, k, v,
                 attn_mask=None,
                 dropout_p=0.0,
                 is_causal=True,
@@ -244,9 +212,7 @@ class PyTorchBackend:
 
         # Prefill: use causal attention
         return F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
+            q, k, v,
             attn_mask=None,
             dropout_p=0.0,
             is_causal=True,

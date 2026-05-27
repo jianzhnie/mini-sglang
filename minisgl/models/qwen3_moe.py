@@ -21,7 +21,6 @@ from minisgl.models.layers.linear import (
     RowParallelLinear,
 )
 from minisgl.models.layers.rms_norm import RMSNorm
-from minisgl.models.qwen3 import Qwen3Attention
 from minisgl.utils.device import get_tp_size
 
 
@@ -148,17 +147,9 @@ class Qwen3MoEDecoderLayer(nn.Module):
 
     def __init__(self, config, is_moe_layer: bool = False) -> None:
         super().__init__()
-        from minisgl.models.qwen3 import Qwen3MLP
+        from minisgl.models.qwen3 import Qwen3Attention, Qwen3MLP
 
-        self.self_attn = Qwen3Attention(
-            config.hidden_size,
-            config.num_attention_heads,
-            config.num_kv_heads,
-            config.head_dim,
-            config.max_position_embeddings,
-            config.rope_theta,
-            config.rms_norm_eps,
-        )
+        self.self_attn = Qwen3Attention(config)
 
         if is_moe_layer:
             self.mlp = Qwen3MoEMLP(
@@ -185,13 +176,16 @@ class Qwen3MoEDecoderLayer(nn.Module):
         k_cache: torch.Tensor | None = None,
         v_cache: torch.Tensor | None = None,
         write_loc: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
         if residual is None:
             residual = hidden_states
             hidden_states, _ = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        attn_out = self.self_attn(hidden_states, positions, k_cache, v_cache, write_loc)
+        attn_out = self.self_attn(
+            hidden_states, positions, k_cache, v_cache, write_loc, **kwargs
+        )
         hidden_states = attn_out + residual
 
         residual = hidden_states
@@ -232,6 +226,7 @@ class Qwen3MoEModel(nn.Module):
         k_cache: torch.Tensor | None = None,
         v_cache: torch.Tensor | None = None,
         write_loc: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -246,6 +241,7 @@ class Qwen3MoEModel(nn.Module):
                 layer_k_cache,
                 layer_v_cache,
                 write_loc,
+                **kwargs,
             )
 
         hidden_states, _ = self.norm(hidden_states)
@@ -272,6 +268,9 @@ class Qwen3MoEForCausalLM(nn.Module):
         k_cache: torch.Tensor | None = None,
         v_cache: torch.Tensor | None = None,
         write_loc: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, k_cache, v_cache, write_loc)
+        hidden_states = self.model(
+            input_ids, positions, k_cache, v_cache, write_loc, **kwargs
+        )
         return self.lm_head(hidden_states)

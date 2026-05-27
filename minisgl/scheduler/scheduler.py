@@ -3,6 +3,7 @@
 __all__ = ["Scheduler"]
 from minisgl.config import SamplingParams, ServerArgs
 from minisgl.engine.engine import Engine
+from minisgl.engine.kvcache.naive import NaiveCacheManager
 from minisgl.engine.kvcache.radix import RadixCacheManager
 from minisgl.scheduler.batch import Req, SequenceStatus
 from minisgl.scheduler.decode import DecodeManager
@@ -13,22 +14,33 @@ from minisgl.utils.logger import logger
 class Scheduler:
     """Coordinates the prefill/decode lifecycle for inference requests.
 
-
     Two-phase scheduling:
     1. Prefill: Process new requests' full prompts
     2. Decode: Generate one token per running request
+
+    Cache strategy: radix (prefix-aware, default) or naive (simple LRU).
     """
 
-    def __init__(self, server_args: ServerArgs, engine: Engine) -> None:
+    def __init__(
+        self,
+        server_args: ServerArgs,
+        engine: Engine,
+        cache_strategy: str = "radix",
+    ) -> None:
         self.args = server_args
         self.engine = engine
         self.device = engine.device
 
         self.pool = engine.kv_cache_pool
-        self.radix_cache = RadixCacheManager(self.pool, server_args.page_size)
-        self.prefill_manager = PrefillManager(server_args, self.pool, self.radix_cache)
+        if cache_strategy == "naive":
+            self.cache_manager = NaiveCacheManager(self.pool)
+        else:
+            self.cache_manager = RadixCacheManager(self.pool, server_args.page_size)
+        self.prefill_manager = PrefillManager(
+            server_args, self.pool, self.cache_manager
+        )
         self.decode_manager = DecodeManager(
-            server_args, self.pool, self.radix_cache, device=engine.device
+            server_args, self.pool, self.cache_manager, device=engine.device
         )
 
         self._uid_counter = 0
@@ -41,7 +53,6 @@ class Scheduler:
 
         model_path = Path(self.args.model_path)
 
-        # Try generation_config.json first (most HF models have this)
         gen_config = model_path / "generation_config.json"
         if gen_config.exists():
             with gen_config.open() as f:
@@ -49,7 +60,6 @@ class Scheduler:
             if "eos_token_id" in cfg:
                 return cfg["eos_token_id"]
 
-        # Fallback: try tokenizer_config.json
         tok_config = model_path / "tokenizer_config.json"
         if tok_config.exists():
             with tok_config.open() as f:
@@ -57,11 +67,9 @@ class Scheduler:
             if "eos_token_id" in cfg:
                 eos = cfg["eos_token_id"]
                 if isinstance(eos, dict):
-                    # Some configs have {"content": "...", "token_id": ...}
                     return eos.get("token_id", eos.get("id", 0))
                 return eos
 
-        # Last resort: try config.json (some models store it here)
         cfg_file = model_path / "config.json"
         if cfg_file.exists():
             with cfg_file.open() as f:
@@ -89,7 +97,6 @@ class Scheduler:
         """Run one scheduler iteration: prefill new requests, then decode running ones."""
         results: list[tuple] = []
 
-        # Phase 1: Prefill — process new requests if any
         prefill_batch = self.prefill_manager.schedule_prefill()
         if prefill_batch is not None:
             logits = self.engine.forward(prefill_batch)
@@ -98,7 +105,6 @@ class Scheduler:
                 req.append_token(token_id)
                 results.append((req.uid, token_id, False))
 
-        # Phase 2: Decode — generate one token per running request
         running = self.prefill_manager.running
         if running:
             decode_batch = self.decode_manager.schedule_decode(running)
@@ -106,6 +112,7 @@ class Scheduler:
                 logits = self.engine.forward(decode_batch)
                 next_tokens = self.engine.sample(logits, decode_batch)
 
+                finished_reqs: list[Req] = []
                 for req, token_id in zip(decode_batch.reqs, next_tokens, strict=False):
                     req.append_token(token_id)
                     finished = False
@@ -115,8 +122,11 @@ class Scheduler:
                     ) or req.output_len >= req.sampling_params.max_tokens:
                         finished = True
                         req.status = SequenceStatus.FINISHED
-                        self.prefill_manager.remove_finished(req)
+                        finished_reqs.append(req)
                     results.append((req.uid, token_id, finished))
+
+                if finished_reqs:
+                    self.prefill_manager.remove_finished_batch(finished_reqs)
 
         return results
 

@@ -5,6 +5,7 @@ Prepares derived tensors from Batch metadata:
 - positions: position encodings
 - write_loc: KV cache write locations (page table indices)
 - req_to_token: page table (num_reqs, max_seq_len)
+- cu_seqlens_q: cumulative sequence lengths for FlashAttention varlen
 """
 
 __all__ = ["BatchContext"]
@@ -32,17 +33,17 @@ class BatchContext:
         """Fill derived tensors from batch metadata."""
         reqs = batch.reqs
 
-        # Collect all token info
         all_input_ids = []
         all_positions = []
         write_loc = []
+        seq_lengths = []
 
         for req in reqs:
             uncached_tokens = req.input_ids[req.cached_len :]
             all_input_ids.extend(uncached_tokens)
             all_positions.extend(range(req.cached_len, len(req.input_ids)))
+            seq_lengths.append(len(uncached_tokens))
 
-            # Map positions to KV cache page indices
             if req.cache_handle:
                 for pos in range(req.cached_len, len(req.input_ids)):
                     page_idx = pos // self.page_size
@@ -72,6 +73,21 @@ class BatchContext:
         if write_loc:
             batch.write_loc = torch.tensor(
                 write_loc,
+                dtype=torch.int32,
+                device=self.device,
+            )
+
+        # Build cu_seqlens for FlashAttention varlen
+        if len(seq_lengths) > 1:
+            cu = torch.tensor(
+                [0] + torch.tensor(seq_lengths).cumsum(0).tolist(),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            batch.cu_seqlens_q = cu
+        else:
+            batch.cu_seqlens_q = torch.tensor(
+                [0, seq_lengths[0]] if seq_lengths else [0],
                 dtype=torch.int32,
                 device=self.device,
             )

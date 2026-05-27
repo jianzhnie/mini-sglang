@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -41,6 +42,7 @@ class Engine:
     """Core inference engine.
 
     Holds the model, KV cache pool, CUDA graphs, and runs forward + sampling.
+    Supports context manager protocol for resource cleanup.
     """
 
     def __init__(
@@ -91,6 +93,8 @@ class Engine:
         self.sampler = Sampler(model_args.vocab_size)
 
         self.cuda_graphs: dict[int, torch.cuda.CUDAGraph] = {}
+        self._graph_inputs: dict[int, tuple] = {}
+        self._graph_outputs: dict[int, torch.Tensor] = {}
         if (
             server_args.cuda_graph_bs
             and server_args.cuda_graph_bs > 0
@@ -99,6 +103,26 @@ class Engine:
             self._capture_cuda_graphs()
 
         logger.info(f"Engine initialized on rank {tp_rank}")
+
+    def __enter__(self) -> "Engine":
+        return self
+
+    def __exit__(self, *args) -> None:
+        self.cleanup()
+
+    def cleanup(self) -> None:
+        """Release GPU resources."""
+        self.cuda_graphs.clear()
+        self._graph_inputs.clear()
+        self._graph_outputs.clear()
+        if hasattr(self, "kv_cache_pool"):
+            del self.kv_cache_pool
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self.cleanup()
 
     def _create_model(self) -> torch.nn.Module:
         from minisgl.models.registry import create_model, detect_model_type
@@ -167,32 +191,56 @@ class Engine:
                     k_cache=self.k_cache,
                     v_cache=self.v_cache,
                     write_loc=batch.write_loc,
+                    cu_seqlens_q=batch.cu_seqlens_q,
                 )
 
-        # Decode: eager forward (CUDA graph output plumbing TBD)
-        with torch.inference_mode():
-            return self.model(
-                input_ids=batch.input_ids,
-                positions=batch.positions,
-                k_cache=self.k_cache,
-                v_cache=self.v_cache,
-                write_loc=batch.write_loc,
-            )
+        # Decode: try CUDA graph first, fall back to eager
+        bs = len(batch.reqs)
+        graph = self._find_graph(bs)
+        if graph is not None and batch.write_loc is not None:
+            graph_bs, ins, outs = graph
+            with torch.inference_mode():
+                ins["input_ids"][:bs].copy_(batch.input_ids)
+                ins["positions"][:bs].copy_(batch.positions)
+                ins["write_loc"][:bs].copy_(batch.write_loc)
+                self.cuda_graphs[graph_bs].replay()
+                return outs[:bs]
+        else:
+            with torch.inference_mode():
+                return self.model(
+                    input_ids=batch.input_ids,
+                    positions=batch.positions,
+                    k_cache=self.k_cache,
+                    v_cache=self.v_cache,
+                    write_loc=batch.write_loc,
+                    cache_seqlens=batch.cache_seqlens,
+                    block_table=batch.block_table,
+                )
+
+    def _find_graph(self, batch_size: int) -> tuple | None:
+        """Find a CUDA graph large enough for the given batch size."""
+        for bs in sorted(self.cuda_graphs.keys()):
+            if bs >= batch_size:
+                return (bs, self._graph_inputs[bs], self._graph_outputs[bs])
+        return None
 
     def sample(self, logits: torch.Tensor, batch: Batch) -> list:
         """Sample next tokens from logits.
 
         Groups requests with identical sampling params for batched sampling.
         """
-        if batch.phase == "decode" and logits.dim() == 3 and logits.shape[1] == 1:
-            logits = logits.squeeze(1)  # (num_reqs, vocab_size)
+        if batch.phase == "decode":
+            if logits.dim() == 3 and logits.shape[1] == 1:
+                logits = logits.squeeze(1)  # (num_reqs, vocab_size)
+            elif logits.dim() == 1:
+                logits = logits.unsqueeze(0)  # (1, vocab_size)
             return self._sample_batched(logits, batch.reqs)
 
         # Prefill: collect last-position logits per request
         last_logits = []
         offset = 0
         for req in batch.reqs:
-            req_len = len(req.input_ids)
+            req_len = req.uncached_len
             last_logits.append(logits[offset + req_len - 1 : offset + req_len])
             offset += req_len
 
@@ -267,7 +315,7 @@ class Engine:
 
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            self.model(
+            output = self.model(
                 input_ids=input_ids,
                 positions=positions,
                 k_cache=self.k_cache,
@@ -276,14 +324,9 @@ class Engine:
             )
 
         self.cuda_graphs[batch_size] = graph
-
-    def replay_cuda_graph(self, batch_size: int) -> None:
-        """Replay a captured CUDA graph for decode."""
-        if batch_size in self.cuda_graphs:
-            self.cuda_graphs[batch_size].replay()
-        else:
-            # Find closest larger graph
-            for bs in sorted(self.cuda_graphs.keys()):
-                if bs >= batch_size:
-                    self.cuda_graphs[bs].replay()
-                    return
+        self._graph_inputs[batch_size] = {
+            "input_ids": input_ids,
+            "positions": positions,
+            "write_loc": write_loc,
+        }
+        self._graph_outputs[batch_size] = output

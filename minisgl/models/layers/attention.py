@@ -111,6 +111,7 @@ class BaseAttention(nn.Module):
         k_cache: torch.Tensor | None = None,
         v_cache: torch.Tensor | None = None,
         write_loc: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
         squeeze_out = hidden_states.dim() == 2
         if squeeze_out:
@@ -129,6 +130,8 @@ class BaseAttention(nn.Module):
 
         self._write_kv_cache(k, v, k_cache, v_cache, write_loc)
 
+        backend_kwargs = self._extra_backend_kwargs()
+        backend_kwargs.update(kwargs)
         output = AttentionBackend.forward(
             q,
             k,
@@ -136,7 +139,7 @@ class BaseAttention(nn.Module):
             k_cache,
             v_cache,
             write_loc,
-            **self._extra_backend_kwargs(),
+            **backend_kwargs,
         )
         output = self._reshape_output(output, batch_size, seq_len)
         output = self._project_output(output)
