@@ -40,7 +40,7 @@ class Scheduler:
             server_args, self.pool, self.cache_manager
         )
         self.decode_manager = DecodeManager(
-            server_args, self.pool, self.cache_manager, device=engine.device
+            server_args, self.pool, device=engine.device
         )
 
         self._uid_counter = 0

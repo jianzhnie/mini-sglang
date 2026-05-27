@@ -41,12 +41,12 @@ class Qwen3Attention(BaseAttention):
         self.num_local_heads = num_heads // tp_size
         self.num_local_kv_heads = num_kv_heads // tp_size
 
-        self.q_proj = ColumnParallelLinear(hidden_size, num_heads * head_dim, bias=True)
+        self.q_proj = ColumnParallelLinear(hidden_size, num_heads * head_dim, bias=False)
         self.k_proj = ColumnParallelLinear(
-            hidden_size, num_kv_heads * head_dim, bias=True
+            hidden_size, num_kv_heads * head_dim, bias=False
         )
         self.v_proj = ColumnParallelLinear(
-            hidden_size, num_kv_heads * head_dim, bias=True
+            hidden_size, num_kv_heads * head_dim, bias=False
         )
         self.o_proj = RowParallelLinear(num_heads * head_dim, hidden_size, bias=False)
         self.q_norm = RMSNorm(head_dim, eps=config.rms_norm_eps)

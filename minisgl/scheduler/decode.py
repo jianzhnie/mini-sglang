@@ -5,7 +5,6 @@ import torch
 
 from minisgl.config import ServerArgs
 from minisgl.engine.kvcache.pool import KVCachePool
-from minisgl.engine.kvcache.radix import RadixCacheManager
 from minisgl.scheduler.batch import Batch, Req
 
 
@@ -20,14 +19,13 @@ class DecodeManager:
         self,
         args: ServerArgs,
         pool: KVCachePool,
-        radix_cache: RadixCacheManager,
         device: torch.device | None = None,
+        **_kwargs,
     ) -> None:
         self.max_running_req = args.max_running_req
         self.max_seq_len = args.max_seq_len
         self.page_size = args.page_size
         self.pool = pool
-        self.radix_cache = radix_cache
         self.device = device or torch.device("cpu")
 
     def schedule_decode(self, running: list[Req]) -> Batch | None:
@@ -58,7 +56,7 @@ class DecodeManager:
 
         for i, req in enumerate(running):
             total_len = len(req.input_ids)
-            cache_seqlens.append(total_len)
+            cache_seqlens.append(total_len - 1)
 
             # Write location for the current token
             if req.cache_handle:
@@ -88,4 +86,22 @@ class DecodeManager:
             cache_seqlens, dtype=torch.int32, device=self.device
         )
         batch.block_table = block_table
+        batch.req_to_token = self._build_req_to_token(running)
         return batch
+
+    def _build_req_to_token(self, running: list[Req]) -> torch.Tensor:
+        num_reqs = len(running)
+        table = torch.full(
+            (num_reqs, self.max_seq_len), -1, dtype=torch.int32, device=self.device
+        )
+        for i, req in enumerate(running):
+            if req.cache_handle:
+                for pos in range(len(req.input_ids)):
+                    page_idx = pos // self.page_size
+                    if page_idx < len(req.cache_handle.page_ids):
+                        offset = pos % self.page_size
+                        table[i, pos] = (
+                            req.cache_handle.page_ids[page_idx] * self.page_size
+                            + offset
+                        )
+        return table

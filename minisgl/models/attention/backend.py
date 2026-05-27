@@ -175,7 +175,11 @@ class FlashInferBackend:
 
 
 class PyTorchBackend:
-    """Standard PyTorch scaled dot-product attention (fallback)."""
+    """Standard PyTorch scaled dot-product attention (fallback).
+
+    During decode, gathers cached K,V from the paged KV cache to provide
+    full context for each request.
+    """
 
     @staticmethod
     def forward(
@@ -195,26 +199,63 @@ class PyTorchBackend:
             k = k.repeat_interleave(num_heads // num_kv_heads, dim=1)
             v = v.repeat_interleave(num_heads // num_kv_heads, dim=1)
 
-        # Decode with KV cache
         if seq_len == 1 and k_cache is not None and v_cache is not None:
-            num_kv_h = k_cache.shape[2]
-            if num_heads != num_kv_h:
-                k_cache = k_cache.repeat_interleave(num_heads // num_kv_h, dim=2)
-                v_cache = v_cache.repeat_interleave(num_heads // num_kv_h, dim=2)
-
-            return F.scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=None,
-                dropout_p=0.0,
-                is_causal=True,
-                scale=scale,
+            return PyTorchBackend._decode_with_cache(
+                q, num_heads, head_dim, k_cache, v_cache, scale, **kwargs
             )
 
-        # Prefill: use causal attention
         return F.scaled_dot_product_attention(
             q, k, v,
-            attn_mask=None,
-            dropout_p=0.0,
-            is_causal=True,
-            scale=scale,
+            attn_mask=None, dropout_p=0.0, is_causal=True, scale=scale,
         )
+
+    @staticmethod
+    def _decode_with_cache(
+        q: torch.Tensor,
+        num_heads: int,
+        head_dim: int,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        scale: float,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Gather cached K,V from page table and run full-context attention."""
+        req_to_token = kwargs.get("req_to_token")
+        cache_seqlens = kwargs.get("cache_seqlens")
+
+        if req_to_token is None or cache_seqlens is None:
+            return F.scaled_dot_product_attention(
+                q, q, q,
+                attn_mask=None, dropout_p=0.0, is_causal=True, scale=scale,
+            )
+
+        batch_size = q.shape[0]
+        num_kv_heads = k_cache.shape[2]
+
+        if num_heads != num_kv_heads:
+            k_cache = k_cache.repeat_interleave(num_heads // num_kv_heads, dim=2)
+            v_cache = v_cache.repeat_interleave(num_heads // num_kv_heads, dim=2)
+
+        flat_k = k_cache.reshape(-1, num_heads, head_dim)
+        flat_v = v_cache.reshape(-1, num_heads, head_dim)
+
+        max_len = int(cache_seqlens.max().item()) + 1
+        gathered_k = flat_k.new_zeros(batch_size, max_len, num_heads, head_dim)
+        gathered_v = flat_v.new_zeros(batch_size, max_len, num_heads, head_dim)
+
+        for i in range(batch_size):
+            total = cache_seqlens[i].item() + 1
+            idxs = req_to_token[i, :total]
+            valid = idxs >= 0
+            if valid.any():
+                gathered_k[i, :total][valid] = flat_k[idxs[valid]]
+                gathered_v[i, :total][valid] = flat_v[idxs[valid]]
+
+        gathered_k = gathered_k.transpose(1, 2)
+        gathered_v = gathered_v.transpose(1, 2)
+
+        output = F.scaled_dot_product_attention(
+            q, gathered_k, gathered_v,
+            attn_mask=None, dropout_p=0.0, is_causal=False, scale=scale,
+        )
+        return output

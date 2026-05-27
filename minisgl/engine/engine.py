@@ -215,6 +215,7 @@ class Engine:
                     write_loc=batch.write_loc,
                     cache_seqlens=batch.cache_seqlens,
                     block_table=batch.block_table,
+                    req_to_token=batch.req_to_token,
                 )
 
     def _find_graph(self, batch_size: int) -> tuple | None:
