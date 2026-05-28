@@ -1,6 +1,6 @@
 ---
 name: check
-description: Run the full pre-commit check suite (shellcheck, flake8, isort, yapf, trailing-whitespace, etc.). Equivalent to pre-commit run --all-files.
+description: Run the full pre-commit check suite (shellcheck, ruff, black, isort, mypy, trailing-whitespace, etc.). Equivalent to pre-commit run --all-files.
 ---
 
 Run the complete pre-commit check suite for the project:
