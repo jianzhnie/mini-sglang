@@ -239,7 +239,9 @@
     "pyright-lsp@claude-plugins-official": true,
     "security-guidance@claude-plugins-official": true,
     "github@claude-plugins-official": false,
-    "huggingface-skills@claude-plugins-official": false
+    "huggingface-skills@claude-plugins-official": false,
+    "superpowers@superpowers-marketplace": true,
+    "example-skills@anthropic-agent-skills": true
   },
   "teammateMode": "in-process"
 }
