@@ -210,5 +210,9 @@ __marimo__/
 .claude/config-audit.log
 .claude/command-log.txt
 .claude/stop-failure.log
+.claude/.session-*
+.claude/worktrees/
+.claude/agent-memory-local/
 .claude/skills/gstack
 .codegraph
+CLAUDE.local.md
