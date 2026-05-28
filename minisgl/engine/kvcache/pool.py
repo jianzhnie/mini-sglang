@@ -1,7 +1,8 @@
 """KV Cache pool and cache handle base classes."""
 
-__all__ = ["BaseCacheHandle", "KVCachePool"]
+__all__ = ["BaseCacheHandle", "CacheManager", "KVCachePool"]
 from dataclasses import dataclass, field
+from typing import Protocol, runtime_checkable
 
 import torch
 
@@ -15,6 +16,16 @@ class BaseCacheHandle:
 
     def num_pages(self) -> int:
         return len(self.page_ids)
+
+
+@runtime_checkable
+class CacheManager(Protocol):
+    """Interface for KV cache managers (RadixCacheManager, NaiveCacheManager)."""
+
+    def match_prefix(self, input_ids: list[int]) -> int: ...
+    def insert(self, input_ids: list[int], handle: BaseCacheHandle) -> None: ...
+    def evict(self, num_pages: int) -> object: ...
+    def remove(self, input_ids: list[int]) -> None: ...
 
 
 class KVCachePool:

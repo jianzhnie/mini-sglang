@@ -45,14 +45,11 @@ class BatchContext:
             seq_lengths.append(len(uncached_tokens))
 
             if req.cache_handle:
+                pages = req.cache_handle.page_ids
                 for pos in range(req.cached_len, len(req.input_ids)):
                     page_idx = pos // self.page_size
-                    offset = pos % self.page_size
-                    if page_idx < len(req.cache_handle.page_ids):
-                        loc = (
-                            req.cache_handle.page_ids[page_idx] * self.page_size
-                            + offset
-                        )
+                    if page_idx < len(pages):
+                        loc = pages[page_idx] * self.page_size + (pos % self.page_size)
                         write_loc.append(loc)
                     else:
                         write_loc.append(-1)
@@ -101,14 +98,18 @@ class BatchContext:
             device=self.device,
         )
         for i, req in enumerate(reqs):
-            if req.cache_handle:
-                for pos in range(len(req.input_ids)):
-                    page_idx = pos // self.page_size
-                    if page_idx < len(req.cache_handle.page_ids):
-                        offset = pos % self.page_size
-                        table[i, pos] = (
-                            req.cache_handle.page_ids[page_idx] * self.page_size
-                            + offset
-                        )
+            handle = req.cache_handle
+            if handle is not None:
+                pages = handle.page_ids
+                total = len(req.input_ids)
+                for p_idx, page_id in enumerate(pages):
+                    start = p_idx * self.page_size
+                    end = min((p_idx + 1) * self.page_size, total)
+                    if start >= total:
+                        break
+                    count = end - start
+                    table[i, start:end] = page_id * self.page_size + torch.arange(
+                        count, dtype=torch.int32, device=self.device
+                    )
 
         batch.req_to_token = table

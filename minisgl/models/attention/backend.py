@@ -274,16 +274,14 @@ class PyTorchBackend:
         flat_v = v_cache.reshape(-1, num_heads, head_dim)
 
         max_len = int(cache_seqlens.max().item()) + 1
-        gathered_k = flat_k.new_zeros(batch_size, max_len, num_heads, head_dim)
-        gathered_v = flat_v.new_zeros(batch_size, max_len, num_heads, head_dim)
+        idxs = req_to_token[:, :max_len]
+        valid_mask = idxs >= 0
+        idxs_safe = idxs.clamp(min=0)
 
-        for i in range(batch_size):
-            total = cache_seqlens[i].item() + 1
-            idxs = req_to_token[i, :total]
-            valid = idxs >= 0
-            if valid.any():
-                gathered_k[i, :total][valid] = flat_k[idxs[valid]]
-                gathered_v[i, :total][valid] = flat_v[idxs[valid]]
+        gathered_k = flat_k[idxs_safe]
+        gathered_v = flat_v[idxs_safe]
+        gathered_k = gathered_k * valid_mask[:, :, None, None]
+        gathered_v = gathered_v * valid_mask[:, :, None, None]
 
         gathered_k = gathered_k.transpose(1, 2)
         gathered_v = gathered_v.transpose(1, 2)

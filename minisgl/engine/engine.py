@@ -81,8 +81,6 @@ class Engine:
             logger.info("Loaded %d weights (model_type=%s)", loaded, model_type)
             if hasattr(self.model, "tie_weights"):
                 self.model.tie_weights(state_dict)
-            if hasattr(self.model, "tie_weights"):
-                self.model.tie_weights(state_dict)
 
         self.kv_cache_pool = self._allocate_kv_cache()
         self._assign_kv_cache()

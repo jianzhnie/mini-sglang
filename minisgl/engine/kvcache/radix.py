@@ -58,37 +58,36 @@ class RadixCacheManager:
     def evict(self, num_pages: int) -> list[BaseCacheHandle]:
         """Evict least recently used nodes to free pages.
 
-        Traverses tree depth-first, stopping early once enough pages are freed.
+        Uses iterative post-order traversal to avoid stack overflow on deep trees.
         """
         evicted: list[BaseCacheHandle] = []
         remaining = num_pages
 
-        def _evict_from(node: RadixNode) -> int:
-            """Recursively evict from subtree. Returns pages freed from this subtree."""
-            nonlocal remaining
+        # Collect nodes in post-order (children before parent, leaf-first)
+        post_order: list[RadixNode] = []
+        stack: list[tuple[RadixNode, bool]] = [(self.root, False)]
+        while stack:
+            node, visited = stack.pop()
+            if visited:
+                post_order.append(node)
+            else:
+                stack.append((node, True))
+                for child in reversed(list(node.children.values())):
+                    stack.append((child, False))
+
+        # Evict in leaf-first order
+        for node in post_order:
             if remaining <= 0:
-                return 0
-
-            freed = 0
-            # Evict children first (leaf-first eviction for better prefix sharing)
-            for child in list(node.children.values()):
-                freed += _evict_from(child)
-
-            # Evict this node if it has a cache handle and is unreferenced
-            if remaining > 0 and node.ref_count == 0 and node.cache_handle is not None:
+                break
+            if node.ref_count == 0 and node.cache_handle is not None:
                 self.pool.free(node.cache_handle)
                 pages = node.cache_handle.num_pages()
                 remaining -= pages
-                freed += pages
                 evicted.append(node.cache_handle)
                 node.cache_handle = None
-                # Prune leaf node
                 if node.parent and not node.children:
                     del node.parent.children[node.token]
 
-            return freed
-
-        _evict_from(self.root)
         return evicted
 
     def remove(self, input_ids: list[int]) -> None:

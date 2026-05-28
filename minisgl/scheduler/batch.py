@@ -47,7 +47,7 @@ class Req:
         self.output_len += 1
 
 
-@dataclass
+@dataclass(slots=True)
 class Batch:
     """A batch of requests for one forward pass."""
 

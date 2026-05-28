@@ -1,6 +1,9 @@
 """Main scheduler: coordinates prefill/decode cycles and tokenizer communication."""
 
 __all__ = ["Scheduler"]
+import json
+from pathlib import Path
+
 from minisgl.config import SamplingParams, ServerArgs
 from minisgl.engine.engine import Engine
 from minisgl.engine.kvcache.naive import NaiveCacheManager
@@ -48,9 +51,6 @@ class Scheduler:
 
     def _load_eos_token(self) -> int:
         """Load EOS token ID from model config, with tokenizer fallback."""
-        import json
-        from pathlib import Path
-
         model_path = Path(self.args.model_path)
 
         gen_config = model_path / "generation_config.json"

@@ -6,8 +6,7 @@ from collections import deque
 from threading import Lock
 
 from minisgl.config import ServerArgs
-from minisgl.engine.kvcache.pool import KVCachePool
-from minisgl.engine.kvcache.radix import RadixCacheManager
+from minisgl.engine.kvcache.pool import CacheManager, KVCachePool
 from minisgl.scheduler.batch import Batch, Req, SequenceStatus
 
 
@@ -18,7 +17,7 @@ class PrefillManager:
         self,
         args: ServerArgs,
         pool: KVCachePool,
-        radix_cache: RadixCacheManager,
+        radix_cache: CacheManager,
     ) -> None:
         self.max_running_req = args.max_running_req
         self.max_seq_len = args.max_seq_len

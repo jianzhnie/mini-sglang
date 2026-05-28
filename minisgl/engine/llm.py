@@ -109,15 +109,11 @@ class LLM:
             results.append("")
 
         pending_uids = set(uid_to_idx.keys())
-        idle_steps = 0
         while pending_uids:
             step_results = self.scheduler.step()
             if not step_results:
-                idle_steps += 1
-                if idle_steps > 100:
-                    time.sleep(0.001)
+                time.sleep(0.0001)  # yield CPU when idle
                 continue
-            idle_steps = 0
             for uid, token_id, finished in step_results:
                 if uid in pending_uids:
                     idx = uid_to_idx[uid]
