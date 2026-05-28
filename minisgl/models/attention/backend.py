@@ -263,7 +263,6 @@ class PyTorchBackend:
                 scale=scale,
             )
 
-        batch_size = q.shape[0]
         num_kv_heads = k_cache.shape[2]
 
         if num_heads != num_kv_heads:
