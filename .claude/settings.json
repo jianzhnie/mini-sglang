@@ -239,7 +239,7 @@
     "pyright-lsp@claude-plugins-official": true,
     "security-guidance@claude-plugins-official": true,
     "github@claude-plugins-official": false,
-    "huggingface-skills@claude-plugins-official": true
+    "huggingface-skills@claude-plugins-official": false
   },
   "teammateMode": "in-process"
 }
