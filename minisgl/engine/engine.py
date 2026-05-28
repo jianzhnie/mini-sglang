@@ -78,7 +78,9 @@ class Engine:
                 self.tp_size,
                 remap_fn=remap_fn,
             )
-            logger.info(f"Loaded {loaded} weights (model_type={model_type})")
+            logger.info("Loaded %d weights (model_type=%s)", loaded, model_type)
+            if hasattr(self.model, "tie_weights"):
+                self.model.tie_weights(state_dict)
             if hasattr(self.model, "tie_weights"):
                 self.model.tie_weights(state_dict)
 
@@ -104,7 +106,7 @@ class Engine:
         ):
             self._capture_cuda_graphs()
 
-        logger.info(f"Engine initialized on rank {tp_rank}")
+        logger.info("Engine initialized on rank %d", tp_rank)
 
     def __enter__(self) -> "Engine":
         return self
@@ -164,7 +166,7 @@ class Engine:
         )
         num_pages = min(num_pages, max_pages_needed)
 
-        logger.info(f"Allocating KV cache: {num_pages} pages")
+        logger.info("Allocating KV cache: %d pages", num_pages)
         return KVCachePool(
             num_layers=ma.num_layers,
             num_pages=num_pages,
@@ -286,7 +288,7 @@ class Engine:
         batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
         batch_sizes = [bs for bs in batch_sizes if bs <= max_bs]
 
-        logger.info(f"Capturing CUDA graphs for batch sizes: {batch_sizes}")
+        logger.info("Capturing CUDA graphs for batch sizes: %s", batch_sizes)
 
         for bs in batch_sizes:
             self._capture_graph_safe(bs)
@@ -296,7 +298,7 @@ class Engine:
         try:
             self._capture_graph(batch_size)
         except RuntimeError as e:
-            logger.warning(f"Failed to capture CUDA graph for bs={batch_size}: {e}")
+            logger.warning("Failed to capture CUDA graph for bs=%d: %s", batch_size, e)
 
     def _capture_graph(self, batch_size: int) -> None:
         """Capture a single CUDA graph for a given batch size."""

@@ -26,11 +26,15 @@ app = FastAPI(title="Mini-SGLang", version="0.1.0")
 
 
 class ChatMessage(BaseModel):
+    """A chat message with role and content."""
+
     role: str
     content: str
 
 
 class ChatCompletionRequest(BaseModel):
+    """OpenAI-compatible chat completion request."""
+
     model: str = "default"
     messages: list[ChatMessage]
     temperature: float = 0.0
@@ -90,7 +94,7 @@ class FrontendManager:
                 if uid in self._results:
                     self._results[uid].put((token_id, finished))
         except (RuntimeError, ValueError) as e:
-            logger.error(f"Scheduler step error: {e}")
+            logger.error("Scheduler step error: %s", e)
 
     def run_event_loop(self) -> None:
         """Background thread running the scheduler loop."""

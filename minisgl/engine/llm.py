@@ -47,7 +47,7 @@ class LLM:
 
         model_args = ModelArgs.from_pretrained(model_path)
 
-        logger.info(f"Loading model from {model_path}")
+        logger.info("Loading model from %s", model_path)
         self.engine = Engine(server_args, model_args, tp_rank=0)
         self.scheduler = Scheduler(server_args, self.engine)
         self.tokenizer = TokenizerWorker(model_path)

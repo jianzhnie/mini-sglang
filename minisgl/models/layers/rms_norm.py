@@ -22,8 +22,8 @@ class RMSNorm(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        residual: torch.Tensor = None,
-    ) -> tuple:
+        residual: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         dtype = x.dtype
 
         if residual is not None:

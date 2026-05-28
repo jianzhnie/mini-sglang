@@ -12,21 +12,22 @@ __all__ = [
     "set_device",
 ]
 import os
+from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
 
 
+@dataclass
 class DeviceState:
     """Holds tensor-parallel state to avoid module-level globals.
 
     Use `reset_device_state()` to clear state between sessions.
     """
 
-    def __init__(self) -> None:
-        self.tp_rank: int = 0
-        self.tp_size: int = 1
-        self.device: torch.device | None = None
+    tp_rank: int = 0
+    tp_size: int = 1
+    device: torch.device | None = None
 
 
 _state = DeviceState()

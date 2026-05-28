@@ -37,7 +37,7 @@ class TokenizerWorker:
     def __init__(self, model_path: str) -> None:
         from transformers import AutoTokenizer
 
-        logger.info(f"Loading tokenizer from {model_path}")
+        logger.info("Loading tokenizer from %s", model_path)
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_path,
             trust_remote_code=True,

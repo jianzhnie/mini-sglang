@@ -104,5 +104,5 @@ def create_model(config: ModelArgs, model_type: str) -> nn.Module:
 
     module = importlib.import_module(module_path)
     model_cls = getattr(module, class_name)
-    logger.info(f"Creating model: {model_cls.__name__} (type={model_type})")
+    logger.info("Creating model: %s (type=%s)", model_cls.__name__, model_type)
     return model_cls(config)
