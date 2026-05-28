@@ -88,6 +88,8 @@ class DecodeManager:
                 pages = handle.page_ids
                 for p_idx, page_id in enumerate(pages):
                     start = p_idx * self.page_size
+                    if start >= total_len:
+                        break
                     end = min((p_idx + 1) * self.page_size, total_len)
                     count = end - start
                     req_to_token[i, start:end] = (
