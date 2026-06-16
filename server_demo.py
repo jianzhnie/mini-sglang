@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
-"""Mini-SGLang OpenAI-compatible API server deployment with OPT-125M.
+"""Mini-SGLang OpenAI-compatible API server demo.
 
 Quick start:
-    python3 server_demo.py
+    python server_demo.py --model-path ~/hfhub/models/facebook/opt-125m
+    python server_demo.py --model-path ~/hfhub/models/Qwen/Qwen3-0.6B
 
 Then test in another terminal:
     curl http://127.0.0.1:8765/health
-    curl http://127.0.0.1:8765/v1/completions \\
-      -H "Content-Type: application/json" \\
-      -d '{"model":"opt","prompt":"The capital of France is","max_tokens":30,"stream":false}'
-    curl http://127.0.0.1:8765/v1/chat/completions \\
-      -H "Content-Type: application/json" \\
-      -d '{"model":"opt","messages":[{"role":"user","content":"The sky is"}],"max_tokens":20,"stream":false}'
-
-Note: OPT-125M is a base (non-instruction-tuned) model. It works best
-with /v1/completions (text continuation). For /v1/chat/completions,
-use an instruction-tuned model like Qwen2-0.5B-Instruct.
+    curl http://127.0.0.1:8765/v1/completions \
+      -H "Content-Type: application/json" \
+      -d '{"prompt":"The capital of France is","max_tokens":30,"stream":false}'
 """
 
+import argparse
 import json
 import os
 import sys
@@ -26,7 +21,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-MODEL_PATH = os.path.expanduser("~/hfhub/models/facebook/opt-125m")
+DEFAULT_MODEL = os.path.expanduser("~/hfhub/models/facebook/opt-125m")
 HOST, PORT = "127.0.0.1", 8765
 
 
@@ -66,7 +61,9 @@ def _stream_request(path: str, body: dict):
         print()
 
 
-def start_server():
+def start_server(model_path: str):
+    import logging
+
     import uvicorn
 
     from minisgl.config import ModelArgs, ServerArgs
@@ -74,12 +71,12 @@ def start_server():
     from minisgl.models.tokenizer.worker import TokenizerWorker
     from minisgl.scheduler.scheduler import Scheduler
     from minisgl.server.frontend import app, init_frontend
-    from minisgl.utils.logger import logger, setup_logger
+    from minisgl.utils.logger import setup_logger
 
-    setup_logger(level="INFO")
+    setup_logger(level=logging.INFO)
 
     args = ServerArgs(
-        model_path=MODEL_PATH,
+        model_path=model_path,
         host=HOST,
         port=PORT,
         tp_size=1,
@@ -89,26 +86,35 @@ def start_server():
         page_size=16,
         memory_ratio=0.5,
     )
-    model_args = ModelArgs.from_pretrained(MODEL_PATH)
-    tokenizer = TokenizerWorker(MODEL_PATH)
+    model_args = ModelArgs.from_pretrained(model_path)
+    tokenizer = TokenizerWorker(model_path)
     engine = Engine(args, model_args, tp_rank=0)
     scheduler = Scheduler(args, engine)
     init_frontend(args, scheduler, tokenizer)
-
-    logger.info(f"API server at http://{HOST}:{PORT}")
-    logger.info("Endpoints: /v1/completions  /v1/chat/completions  /health")
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
 
 
 if __name__ == "__main__":
     import multiprocessing
 
+    parser = argparse.ArgumentParser(description="Mini-SGLang Server Demo")
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default=DEFAULT_MODEL,
+        help="Path to HuggingFace model directory",
+    )
+    cli_args = parser.parse_args()
+    model_path = cli_args.model_path
+
     print("=" * 60)
     print("  Mini-SGLang OpenAI API Server Demo")
-    print(f"  Model: {MODEL_PATH}")
+    print(f"  Model: {model_path}")
     print("=" * 60)
 
-    server_proc = multiprocessing.Process(target=start_server, daemon=True)
+    server_proc = multiprocessing.Process(
+        target=start_server, args=(model_path,), daemon=True
+    )
     server_proc.start()
     time.sleep(8)
 
@@ -124,12 +130,7 @@ if __name__ == "__main__":
     for prompt in prompts:
         resp = _request(
             "/v1/completions",
-            {
-                "model": "opt",
-                "prompt": prompt,
-                "max_tokens": 20,
-                "stream": False,
-            },
+            {"prompt": prompt, "max_tokens": 20, "stream": False},
         )
         text = resp.get("choices", [{}])[0].get("text", "").replace("\n", "\\n")
         print(f"  {prompt!r}")
@@ -140,23 +141,14 @@ if __name__ == "__main__":
     print("  → ", end="", flush=True)
     _stream_request(
         "/v1/completions",
-        {
-            "model": "opt",
-            "prompt": "The capital of France is",
-            "max_tokens": 15,
-            "stream": True,
-        },
+        {"prompt": "The capital of France is", "max_tokens": 15, "stream": True},
     )
 
     print("\n── POST /v1/chat/completions (sync) ──")
-    print("  Note: OPT is a base model, output may be low quality.")
     resp = _request(
         "/v1/chat/completions",
         {
-            "model": "opt",
-            "messages": [
-                {"role": "user", "content": "The weather today is"},
-            ],
+            "messages": [{"role": "user", "content": "The weather today is"}],
             "max_tokens": 15,
             "stream": False,
         },

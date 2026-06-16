@@ -80,8 +80,8 @@ class RadixCacheManager:
             if remaining <= 0:
                 break
             if node.ref_count == 0 and node.cache_handle is not None:
-                self.pool.free(node.cache_handle)
                 pages = node.cache_handle.num_pages()
+                self.pool.free(node.cache_handle)
                 remaining -= pages
                 evicted.append(node.cache_handle)
                 node.cache_handle = None

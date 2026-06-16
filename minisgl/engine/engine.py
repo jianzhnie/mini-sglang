@@ -308,13 +308,14 @@ class Engine:
 
         # Warmup
         for _ in range(3):
-            self.model(
-                input_ids=input_ids,
-                positions=positions,
-                k_cache=self.k_cache,
-                v_cache=self.v_cache,
-                write_loc=write_loc,
-            )
+            with torch.inference_mode():
+                self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    k_cache=self.k_cache,
+                    v_cache=self.v_cache,
+                    write_loc=write_loc,
+                )
 
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):

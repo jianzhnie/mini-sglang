@@ -90,26 +90,25 @@ class RMSNormModel(nn.Module):
     def __init__(
         self,
         config,
-        decoder_layer_cls: type,
         attention_cls: type,
         mlp_cls: type | None = None,
-        layer_kwargs_fn=None,
     ) -> None:
         super().__init__()
         self.config = config
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size, config.hidden_size
         )
-        mlp = None
-        if mlp_cls is not None:
-            mlp = mlp_cls(config.hidden_size, config.intermediate_size)
         self.layers = nn.ModuleList(
             [
-                decoder_layer_cls(
+                RMSNormDecoderLayer(
                     hidden_size=config.hidden_size,
                     rms_norm_eps=config.rms_norm_eps,
                     attention=attention_cls(config),
-                    mlp=mlp,
+                    mlp=(
+                        mlp_cls(config.hidden_size, config.intermediate_size)
+                        if mlp_cls is not None
+                        else None
+                    ),
                     intermediate_size=config.intermediate_size,
                 )
                 for _ in range(config.num_layers)

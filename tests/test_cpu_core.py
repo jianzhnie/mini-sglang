@@ -459,9 +459,9 @@ class TestModelDummy(unittest.TestCase):
         model = Qwen2ForCausalLM(config)
         for module in model.modules():
             if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight, gain=0.5)
-            elif hasattr(module, "_init_weights"):
-                module._init_weights()
+                nn.init.normal_(module.weight, std=0.02)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
         model.eval()
         input_ids = torch.randint(0, 1000, (1, 16))
         positions = torch.arange(16)
@@ -619,6 +619,301 @@ class TestRegistry(unittest.TestCase):
             with torch.inference_mode():
                 out = model(input_ids=ids, positions=pos)
             self.assertEqual(out.shape, (1, 4, 100))
+
+
+
+# ── Test NaiveCacheManager ──
+class TestNaiveCacheManager(unittest.TestCase):
+    def _make_pool(self, num_pages=50):
+        from minisgl.engine.kvcache.pool import KVCachePool
+
+        return KVCachePool(
+            num_layers=2,
+            num_pages=num_pages,
+            page_size=4,
+            num_kv_heads=4,
+            head_dim=32,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+
+    def test_allocate_and_free(self):
+        from minisgl.engine.kvcache.naive import NaiveCacheManager
+
+        pool = self._make_pool(50)
+        mgr = NaiveCacheManager(pool, page_size=4)
+        handle = mgr.allocate(uid=1, num_pages=5)
+        self.assertEqual(handle.num_pages(), 5)
+        self.assertEqual(pool.free_count(), 45)
+        mgr.free(1)
+        self.assertEqual(pool.free_count(), 50)
+
+    def test_eviction_on_pressure(self):
+        from minisgl.engine.kvcache.naive import NaiveCacheManager
+
+        pool = self._make_pool(10)
+        mgr = NaiveCacheManager(pool, page_size=4)
+        mgr.allocate(uid=1, num_pages=6)
+        mgr.allocate(uid=2, num_pages=4)
+        self.assertEqual(pool.free_count(), 0)
+        handle3 = mgr.allocate(uid=3, num_pages=3)
+        self.assertIsNotNone(handle3)
+        self.assertEqual(handle3.num_pages(), 3)
+
+    def test_touch_moves_to_end(self):
+        from minisgl.engine.kvcache.naive import NaiveCacheManager
+
+        pool = self._make_pool(10)
+        mgr = NaiveCacheManager(pool, page_size=4)
+        mgr.allocate(uid=1, num_pages=3)
+        mgr.allocate(uid=2, num_pages=3)
+        mgr.touch(1)
+        lru_keys = list(mgr.lru.keys())
+        self.assertEqual(lru_keys[-1], 1)
+
+    def test_match_prefix_always_zero(self):
+        from minisgl.engine.kvcache.naive import NaiveCacheManager
+
+        pool = self._make_pool(10)
+        mgr = NaiveCacheManager(pool, page_size=4)
+        self.assertEqual(mgr.match_prefix([1, 2, 3]), 0)
+
+
+# ── Test Radix Cache Evict/Remove ──
+class TestRadixCacheEvictRemove(unittest.TestCase):
+    def _make_pool_and_radix(self, num_pages=50):
+        from minisgl.engine.kvcache.pool import KVCachePool
+        from minisgl.engine.kvcache.radix import RadixCacheManager
+
+        pool = KVCachePool(
+            num_layers=2,
+            num_pages=num_pages,
+            page_size=4,
+            num_kv_heads=4,
+            head_dim=32,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+        radix = RadixCacheManager(pool, page_size=4)
+        return pool, radix
+
+    def test_remove_decrements_refcount(self):
+        pool, radix = self._make_pool_and_radix()
+        tokens = [1, 2, 3, 4]
+        handle = pool.alloc(1)
+        radix.insert(tokens, handle)
+        node = radix.root.children[1]
+        self.assertEqual(node.ref_count, 1)
+        radix.remove(tokens)
+        self.assertEqual(node.ref_count, 0)
+
+    def test_evict_after_remove(self):
+        pool, radix = self._make_pool_and_radix(20)
+        tokens = [1, 2, 3, 4, 5, 6, 7, 8]
+        handle = pool.alloc(2)
+        initial_free = pool.free_count()
+        radix.insert(tokens, handle)
+        radix.remove(tokens)
+        evicted = radix.evict(2)
+        self.assertGreater(len(evicted), 0)
+
+    def test_evict_respects_refcount(self):
+        pool, radix = self._make_pool_and_radix(20)
+        tokens = [1, 2, 3, 4]
+        handle = pool.alloc(1)
+        radix.insert(tokens, handle)
+        evicted = radix.evict(1)
+        self.assertEqual(len(evicted), 0)
+
+
+# ── Test OPT Model ──
+class TestOPTModel(unittest.TestCase):
+    def test_opt_forward(self):
+        from minisgl.config import ModelArgs
+        from minisgl.models.opt import OPTForCausalLM
+
+        config = ModelArgs(
+            hidden_size=128,
+            num_layers=2,
+            num_attention_heads=4,
+            num_kv_heads=4,
+            intermediate_size=512,
+            vocab_size=1000,
+            max_position_embeddings=128,
+            head_dim=32,
+        )
+        model = OPTForCausalLM(config)
+        model.eval()
+        input_ids = torch.randint(0, 1000, (1, 8))
+        positions = torch.arange(8)
+        with torch.inference_mode():
+            logits = model(input_ids=input_ids, positions=positions)
+        self.assertEqual(logits.shape, (1, 8, 1000))
+
+
+# ── Test DecodeManager ──
+class TestDecodeManager(unittest.TestCase):
+    def test_schedule_decode_basic(self):
+        from minisgl.config import SamplingParams, ServerArgs
+        from minisgl.engine.kvcache.pool import KVCachePool
+        from minisgl.scheduler.batch import Req, SequenceStatus
+        from minisgl.scheduler.decode import DecodeManager
+
+        args = ServerArgs(
+            model_path="/tmp/test",
+            max_running_req=8,
+            max_seq_len=64,
+            page_size=4,
+        )
+        pool = KVCachePool(
+            num_layers=2,
+            num_pages=20,
+            page_size=4,
+            num_kv_heads=4,
+            head_dim=32,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+        handle = pool.alloc(4)
+        req = Req(
+            input_ids=[1, 2, 3, 4, 5],
+            uid=0,
+            cache_handle=handle,
+            sampling_params=SamplingParams(max_tokens=10),
+        )
+        req.status = SequenceStatus.RUNNING
+
+        dm = DecodeManager(args, pool, device=torch.device("cpu"))
+        batch = dm.schedule_decode([req])
+        self.assertIsNotNone(batch)
+        self.assertEqual(batch.phase, "decode")
+        self.assertEqual(batch.input_ids.tolist(), [5])
+        self.assertEqual(batch.positions.tolist(), [4])
+        self.assertIsNotNone(batch.write_loc)
+        self.assertIsNotNone(batch.block_table)
+        self.assertIsNotNone(batch.cache_seqlens)
+
+    def test_schedule_decode_empty(self):
+        from minisgl.config import ServerArgs
+        from minisgl.engine.kvcache.pool import KVCachePool
+        from minisgl.scheduler.decode import DecodeManager
+
+        args = ServerArgs(model_path="/tmp/test", max_seq_len=64, page_size=4)
+        pool = KVCachePool(
+            num_layers=2, num_pages=10, page_size=4,
+            num_kv_heads=4, head_dim=32,
+            dtype=torch.float32, device=torch.device("cpu"),
+        )
+        dm = DecodeManager(args, pool, device=torch.device("cpu"))
+        self.assertIsNone(dm.schedule_decode([]))
+
+
+# ── Test PrefillManager ──
+class TestPrefillManager(unittest.TestCase):
+    def test_schedule_prefill_basic(self):
+        from minisgl.config import SamplingParams, ServerArgs
+        from minisgl.engine.kvcache.naive import NaiveCacheManager
+        from minisgl.engine.kvcache.pool import KVCachePool
+        from minisgl.scheduler.batch import Req, SequenceStatus
+        from minisgl.scheduler.prefill import PrefillManager
+
+        args = ServerArgs(
+            model_path="/tmp/test",
+            max_running_req=8,
+            max_seq_len=64,
+            page_size=4,
+        )
+        pool = KVCachePool(
+            num_layers=2, num_pages=50, page_size=4,
+            num_kv_heads=4, head_dim=32,
+            dtype=torch.float32, device=torch.device("cpu"),
+        )
+        cache = NaiveCacheManager(pool, page_size=4)
+        pm = PrefillManager(args, pool, cache)
+
+        req = Req(
+            input_ids=[1, 2, 3, 4, 5],
+            uid=0,
+            sampling_params=SamplingParams(max_tokens=10),
+        )
+        pm.add_request(req)
+        batch = pm.schedule_prefill()
+        self.assertIsNotNone(batch)
+        self.assertEqual(batch.phase, "prefill")
+        self.assertEqual(len(batch.reqs), 1)
+        self.assertEqual(req.status, SequenceStatus.RUNNING)
+        self.assertIsNotNone(req.cache_handle)
+
+    def test_schedule_prefill_empty(self):
+        from minisgl.config import ServerArgs
+        from minisgl.engine.kvcache.naive import NaiveCacheManager
+        from minisgl.engine.kvcache.pool import KVCachePool
+        from minisgl.scheduler.prefill import PrefillManager
+
+        args = ServerArgs(model_path="/tmp/test", max_seq_len=64, page_size=4)
+        pool = KVCachePool(
+            num_layers=2, num_pages=20, page_size=4,
+            num_kv_heads=4, head_dim=32,
+            dtype=torch.float32, device=torch.device("cpu"),
+        )
+        cache = NaiveCacheManager(pool, page_size=4)
+        pm = PrefillManager(args, pool, cache)
+        self.assertIsNone(pm.schedule_prefill())
+
+
+# ── Test Shared Decoder Base Classes ──
+class TestSharedDecoder(unittest.TestCase):
+    def test_gated_mlp(self):
+        from minisgl.models.decoder import GatedMLP
+
+        mlp = GatedMLP(128, 512)
+        x = torch.randn(2, 8, 128)
+        y = mlp(x)
+        self.assertEqual(y.shape, (2, 8, 128))
+
+    def test_rmsnorm_decoder_layer(self):
+        from minisgl.config import ModelArgs
+        from minisgl.models.decoder import RMSNormDecoderLayer
+        from minisgl.models.llama import LlamaAttention
+
+        config = ModelArgs(
+            hidden_size=128,
+            num_layers=1,
+            num_attention_heads=4,
+            num_kv_heads=4,
+            intermediate_size=512,
+            vocab_size=100,
+            max_position_embeddings=64,
+            head_dim=32,
+        )
+        layer = RMSNormDecoderLayer(
+            hidden_size=128,
+            rms_norm_eps=1e-6,
+            attention=LlamaAttention(config),
+            intermediate_size=512,
+        )
+        x = torch.randn(1, 8, 128)
+        positions = torch.arange(8)
+        out = layer(x, positions)
+        self.assertEqual(out.shape, (1, 8, 128))
+
+    def test_llama_inherits_tie_weights(self):
+        from minisgl.models.decoder import RMSNormForCausalLM
+        from minisgl.models.llama import LlamaForCausalLM
+
+        self.assertTrue(issubclass(LlamaForCausalLM, RMSNormForCausalLM))
+
+    def test_mlp_alias(self):
+        from minisgl.models.decoder import GatedMLP
+        from minisgl.models.llama import LlamaMLP
+        from minisgl.models.mistral import MistralMLP
+        from minisgl.models.qwen2 import Qwen2MLP
+        from minisgl.models.qwen3 import Qwen3MLP
+
+        self.assertIs(LlamaMLP, GatedMLP)
+        self.assertIs(Qwen2MLP, GatedMLP)
+        self.assertIs(Qwen3MLP, GatedMLP)
+        self.assertIs(MistralMLP, GatedMLP)
 
 
 if __name__ == "__main__":

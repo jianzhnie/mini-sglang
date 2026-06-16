@@ -100,10 +100,13 @@ class FrontendManager:
         """Background thread running the scheduler loop."""
         logger.info("Scheduler event loop started")
         while self._running:
-            if self.scheduler.is_idle():
-                time.sleep(0.01)
-                continue
-            self.process_step()
+            try:
+                if self.scheduler.is_idle():
+                    time.sleep(0.01)
+                    continue
+                self.process_step()
+            except Exception as exc:
+                logger.error("Scheduler event loop error: %s", exc)
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self.run_event_loop, daemon=True)
