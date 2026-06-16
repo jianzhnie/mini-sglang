@@ -44,10 +44,10 @@ class DecodeManager:
         batch = Batch(reqs=running, phase="decode")
         batch.input_ids = torch.tensor(
             all_input_ids, dtype=torch.long, device=self.device
-        )
+        ).unsqueeze(1)
         batch.positions = torch.tensor(
             all_positions, dtype=torch.long, device=self.device
-        )
+        ).unsqueeze(1)
 
         num_reqs = len(running)
         max_blocks = (self.max_seq_len + self.page_size - 1) // self.page_size

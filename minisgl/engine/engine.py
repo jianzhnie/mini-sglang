@@ -202,8 +202,8 @@ class Engine:
         if graph is not None and batch.write_loc is not None:
             graph_bs, ins, outs = graph
             with torch.inference_mode():
-                ins["input_ids"][:bs].copy_(batch.input_ids)
-                ins["positions"][:bs].copy_(batch.positions)
+                ins["input_ids"][:bs].copy_(batch.input_ids.squeeze(1))
+                ins["positions"][:bs].copy_(batch.positions.squeeze(1))
                 ins["write_loc"][:bs].copy_(batch.write_loc)
                 self.cuda_graphs[graph_bs].replay()
                 return outs[:bs]

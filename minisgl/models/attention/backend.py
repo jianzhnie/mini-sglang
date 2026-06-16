@@ -228,6 +228,12 @@ class PyTorchBackend:
                 q, num_heads, head_dim, k_cache, v_cache, scale, **kwargs
             )
 
+        cu_seqlens_q = kwargs.get("cu_seqlens_q")
+        if cu_seqlens_q is not None and len(cu_seqlens_q) > 2:
+            return PyTorchBackend._prefill_varlen(
+                q, k, v, cu_seqlens_q, scale
+            )
+
         return F.scaled_dot_product_attention(
             q,
             k,
@@ -237,6 +243,34 @@ class PyTorchBackend:
             is_causal=True,
             scale=scale,
         )
+
+    @staticmethod
+    def _prefill_varlen(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        scale: float,
+    ) -> torch.Tensor:
+        """Handle multi-sequence prefill by processing each sequence separately."""
+        batch, num_heads, total_len, head_dim = q.shape
+        outputs = torch.zeros_like(q)
+        num_seqs = len(cu_seqlens) - 1
+        for i in range(num_seqs):
+            start = int(cu_seqlens[i].item())
+            end = int(cu_seqlens[i + 1].item())
+            qi = q[:, :, start:end, :]
+            ki = k[:, :, start:end, :]
+            vi = v[:, :, start:end, :]
+            out_i = F.scaled_dot_product_attention(
+                qi, ki, vi,
+                attn_mask=None,
+                dropout_p=0.0,
+                is_causal=True,
+                scale=scale,
+            )
+            outputs[:, :, start:end, :] = out_i
+        return outputs
 
     @staticmethod
     def _decode_with_cache(

@@ -149,9 +149,12 @@ class LLM:
 
         prompts = [self.tokenizer.apply_chat_template(msgs) for msgs in msg_list]
 
-        return self.generate(
+        results = self.generate(
             prompts,
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
         )
+        if single_input:
+            return results[0] if isinstance(results, list) else results
+        return results

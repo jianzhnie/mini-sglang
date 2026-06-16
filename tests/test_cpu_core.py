@@ -441,8 +441,6 @@ class TestModelDummy(unittest.TestCase):
 
     def test_deep_decoder_forward(self):
         """Test forward pass through multiple layers with residual flow."""
-        torch.manual_seed(42)
-
         from minisgl.config import ModelArgs
         from minisgl.models.qwen2 import Qwen2ForCausalLM
 
@@ -456,19 +454,20 @@ class TestModelDummy(unittest.TestCase):
             max_position_embeddings=128,
             head_dim=32,
         )
+        gen = torch.Generator().manual_seed(123)
         model = Qwen2ForCausalLM(config)
-        for module in model.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.normal_(module.weight, std=0.02)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
+        for name, param in model.named_parameters():
+            if param.dim() >= 2:
+                nn.init.normal_(param, std=0.02, generator=gen)
+            elif param.dim() == 1:
+                nn.init.ones_(param)
         model.eval()
-        input_ids = torch.randint(0, 1000, (1, 16))
+        input_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]])
         positions = torch.arange(16)
         with torch.inference_mode():
             logits = model(input_ids=input_ids, positions=positions)
-        self.assertFalse(torch.isnan(logits).any())
-        self.assertFalse(torch.isinf(logits).any())
+        self.assertFalse(torch.isnan(logits).any(), f"NaN in logits: {logits}")
+        self.assertFalse(torch.isinf(logits).any(), f"Inf in logits: {logits}")
 
     def test_with_kv_cache(self):
         """Test forward pass with KV cache tensors."""
@@ -787,8 +786,8 @@ class TestDecodeManager(unittest.TestCase):
         batch = dm.schedule_decode([req])
         self.assertIsNotNone(batch)
         self.assertEqual(batch.phase, "decode")
-        self.assertEqual(batch.input_ids.tolist(), [5])
-        self.assertEqual(batch.positions.tolist(), [4])
+        self.assertEqual(batch.input_ids.tolist(), [[5]])
+        self.assertEqual(batch.positions.tolist(), [[4]])
         self.assertIsNotNone(batch.write_loc)
         self.assertIsNotNone(batch.block_table)
         self.assertIsNotNone(batch.cache_seqlens)
