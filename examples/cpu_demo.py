@@ -59,7 +59,7 @@ def main() -> None:
         server_args = ServerArgs(
             model_path=tmpdir,
             tp_size=1,
-            attention_backend="fa",
+            attention_backend="pt",
             max_running_req=4,
             max_seq_len=max_pos,
             page_size=8,
