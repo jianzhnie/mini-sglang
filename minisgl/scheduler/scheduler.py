@@ -49,35 +49,53 @@ class Scheduler:
         self._uid_counter = 0
         self.eos_token_id = self._load_eos_token()
 
-    def _load_eos_token(self) -> int:
-        """Load EOS token ID from model config, with tokenizer fallback."""
+    def _load_eos_token(self) -> set[int]:
+        """Load EOS token ID(s) from model config, with tokenizer fallback.
+
+        Returns a set of EOS token IDs to handle models with multiple EOS tokens
+        (e.g., Qwen3 uses [151645, 151643]).
+        """
         model_path = Path(self.args.model_path)
 
+        raw_eos = None
         gen_config = model_path / "generation_config.json"
         if gen_config.exists():
             with gen_config.open() as f:
                 cfg = json.load(f)
             if "eos_token_id" in cfg:
-                return cfg["eos_token_id"]
+                raw_eos = cfg["eos_token_id"]
 
-        tok_config = model_path / "tokenizer_config.json"
-        if tok_config.exists():
-            with tok_config.open() as f:
-                cfg = json.load(f)
-            if "eos_token_id" in cfg:
-                eos = cfg["eos_token_id"]
-                if isinstance(eos, dict):
-                    return eos.get("token_id", eos.get("id", 0))
-                return eos
+        if raw_eos is None:
+            tok_config = model_path / "tokenizer_config.json"
+            if tok_config.exists():
+                with tok_config.open() as f:
+                    cfg = json.load(f)
+                if "eos_token_id" in cfg:
+                    raw_eos = cfg["eos_token_id"]
 
-        cfg_file = model_path / "config.json"
-        if cfg_file.exists():
-            with cfg_file.open() as f:
-                cfg = json.load(f)
-            return cfg.get("eos_token_id", 0)
+        if raw_eos is None:
+            cfg_file = model_path / "config.json"
+            if cfg_file.exists():
+                with cfg_file.open() as f:
+                    cfg = json.load(f)
+                raw_eos = cfg.get("eos_token_id", 0)
 
-        logger.warning("Could not determine EOS token ID, using 0")
-        return 0
+        if raw_eos is None:
+            logger.warning("Could not determine EOS token ID, using {0}")
+            return {0}
+
+        return self._normalize_eos(raw_eos)
+
+    @staticmethod
+    def _normalize_eos(raw_eos) -> set[int]:
+        """Convert various EOS formats to a set of int IDs."""
+        if isinstance(raw_eos, int):
+            return {raw_eos}
+        if isinstance(raw_eos, list):
+            return {int(x) for x in raw_eos}
+        if isinstance(raw_eos, dict):
+            return {raw_eos.get("token_id", raw_eos.get("id", 0))}
+        return {0}
 
     def add_request(self, input_ids: list[int], sampling_params: SamplingParams) -> int:
         """Add a new request and return its UID."""
@@ -117,7 +135,7 @@ class Scheduler:
                     req.append_token(token_id)
                     finished = False
                     if (
-                        token_id == self.eos_token_id
+                        token_id in self.eos_token_id
                         and not req.sampling_params.ignore_eos
                     ) or req.output_len >= req.sampling_params.max_tokens:
                         finished = True

@@ -65,38 +65,34 @@ class AttentionBackend:
         write_loc: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        """Compute attention output. Routes to the configured backend."""
+        """Compute attention output. Routes to the configured backend.
+
+        Backend selection:
+        - "fi": FlashInfer (if available)
+        - "fa": FlashAttention (if available), else PyTorch fallback
+        - "pt": Always use PyTorch SDPA (works on CUDA, NPU, CPU)
+
+        On NPU devices, PyTorch backend is used automatically since
+        flash_attn is not available. torch_npu provides SDPA acceleration.
+        """
         backend = cls._backend_name
+
+        if backend == "pt":
+            return PyTorchBackend.forward(
+                q, k, v, k_cache, v_cache, write_loc, **kwargs
+            )
 
         if "fi" in backend and _FLASHINFER_AVAILABLE:
             return FlashInferBackend.forward(
-                q,
-                k,
-                v,
-                k_cache,
-                v_cache,
-                write_loc,
-                **kwargs,
+                q, k, v, k_cache, v_cache, write_loc, **kwargs
             )
         elif _FLASH_ATTN_AVAILABLE:
             return FlashAttentionBackend.forward(
-                q,
-                k,
-                v,
-                k_cache,
-                v_cache,
-                write_loc,
-                **kwargs,
+                q, k, v, k_cache, v_cache, write_loc, **kwargs
             )
         else:
             return PyTorchBackend.forward(
-                q,
-                k,
-                v,
-                k_cache,
-                v_cache,
-                write_loc,
-                **kwargs,
+                q, k, v, k_cache, v_cache, write_loc, **kwargs
             )
 
 
@@ -309,21 +305,28 @@ class PyTorchBackend:
         max_len = int(cache_seqlens.max().item()) + 1
         idxs = req_to_token[:, :max_len]
         valid_mask = idxs >= 0
-        idxs_safe = idxs.clamp(min=0)
+        idxs_safe = idxs.clamp(min=0).long()
 
         gathered_k = flat_k[idxs_safe]
         gathered_v = flat_v[idxs_safe]
-        gathered_k = gathered_k * valid_mask[:, :, None, None]
-        gathered_v = gathered_v * valid_mask[:, :, None, None]
 
         gathered_k = gathered_k.transpose(1, 2)
         gathered_v = gathered_v.transpose(1, 2)
+
+        num_reqs = q.shape[0]
+        attn_mask = valid_mask.unsqueeze(1).unsqueeze(2).expand(
+            num_reqs, num_heads, 1, max_len
+        )
+        attn_bias = torch.zeros(
+            num_reqs, num_heads, 1, max_len, dtype=q.dtype, device=q.device
+        )
+        attn_bias.masked_fill_(~attn_mask, float("-inf"))
 
         output = F.scaled_dot_product_attention(
             q,
             gathered_k,
             gathered_v,
-            attn_mask=None,
+            attn_mask=attn_bias,
             dropout_p=0.0,
             is_causal=False,
             scale=scale,

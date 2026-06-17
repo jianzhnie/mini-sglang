@@ -13,6 +13,7 @@ class DecodeManager:
 
     Uses KV cache for incremental decoding: only the last token per request
     is processed, while all previous tokens are read from the KV cache.
+    Pre-allocates tensors to minimize per-step allocation overhead.
     """
 
     def __init__(
@@ -27,64 +28,66 @@ class DecodeManager:
         self.page_size = args.page_size
         self.pool = pool
         self.device = device or torch.device("cpu")
+        self._max_blocks = (self.max_seq_len + self.page_size - 1) // self.page_size
+
         self._page_offsets = torch.arange(
             self.page_size, dtype=torch.int32, device=self.device
+        )
+
+        self._input_ids_buf = torch.zeros(
+            self.max_running_req, 1, dtype=torch.long, device=self.device
+        )
+        self._positions_buf = torch.zeros(
+            self.max_running_req, 1, dtype=torch.long, device=self.device
+        )
+        self._write_loc_buf = torch.full(
+            (self.max_running_req,), -1, dtype=torch.int32, device=self.device
+        )
+        self._cache_seqlens_buf = torch.zeros(
+            self.max_running_req, dtype=torch.int32, device=self.device
+        )
+        self._block_table_buf = torch.full(
+            (self.max_running_req, self._max_blocks),
+            -1, dtype=torch.int32, device=self.device,
+        )
+        self._req_to_token_buf = torch.full(
+            (self.max_running_req, self.max_seq_len),
+            -1, dtype=torch.int32, device=self.device,
         )
 
     def schedule_decode(self, running: list[Req]) -> Batch | None:
         if not running:
             return None
 
-        all_input_ids = [req.input_ids[-1] for req in running]
-        all_positions = [len(req.input_ids) - 1 for req in running]
-
-        if not all_input_ids:
-            return None
-
-        batch = Batch(reqs=running, phase="decode")
-        batch.input_ids = torch.tensor(
-            all_input_ids, dtype=torch.long, device=self.device
-        ).unsqueeze(1)
-        batch.positions = torch.tensor(
-            all_positions, dtype=torch.long, device=self.device
-        ).unsqueeze(1)
-
         num_reqs = len(running)
-        max_blocks = (self.max_seq_len + self.page_size - 1) // self.page_size
-        block_table = torch.full(
-            (num_reqs, max_blocks), -1, dtype=torch.int32, device=self.device
-        )
-        req_to_token = torch.full(
-            (num_reqs, self.max_seq_len), -1, dtype=torch.int32, device=self.device
-        )
+        batch = Batch(reqs=running, phase="decode")
 
-        write_loc: list[int] = []
-        cache_seqlens: list[int] = []
+        self._block_table_buf[:num_reqs].fill_(-1)
+        self._req_to_token_buf[:num_reqs].fill_(-1)
 
         for i, req in enumerate(running):
             total_len = len(req.input_ids)
-            cache_seqlens.append(total_len - 1)
+            self._input_ids_buf[i, 0] = req.input_ids[-1]
+            self._positions_buf[i, 0] = total_len - 1
+            self._cache_seqlens_buf[i] = total_len - 1
 
             handle = req.cache_handle
             if handle is not None:
-                # Write location for the current (last) token
                 pos = total_len - 1
                 page_idx = pos // self.page_size
                 if page_idx < len(handle.page_ids):
-                    loc = (
+                    self._write_loc_buf[i] = (
                         handle.page_ids[page_idx] * self.page_size
                         + pos % self.page_size
                     )
-                    write_loc.append(loc)
                 else:
-                    write_loc.append(-1)
+                    self._write_loc_buf[i] = -1
 
-                # Block table row
                 for j, pid in enumerate(handle.page_ids):
-                    if j < max_blocks:
-                        block_table[i, j] = pid
+                    if j >= self._max_blocks:
+                        break
+                    self._block_table_buf[i, j] = pid
 
-                # req_to_token row: map each position to KV cache slot
                 pages = handle.page_ids
                 for p_idx, page_id in enumerate(pages):
                     start = p_idx * self.page_size
@@ -92,16 +95,16 @@ class DecodeManager:
                         break
                     end = min((p_idx + 1) * self.page_size, total_len)
                     count = end - start
-                    req_to_token[i, start:end] = (
+                    self._req_to_token_buf[i, start:end] = (
                         page_id * self.page_size + self._page_offsets[:count]
                     )
             else:
-                write_loc.append(-1)
+                self._write_loc_buf[i] = -1
 
-        batch.write_loc = torch.tensor(write_loc, dtype=torch.int32, device=self.device)
-        batch.cache_seqlens = torch.tensor(
-            cache_seqlens, dtype=torch.int32, device=self.device
-        )
-        batch.block_table = block_table
-        batch.req_to_token = req_to_token
+        batch.input_ids = self._input_ids_buf[:num_reqs]
+        batch.positions = self._positions_buf[:num_reqs]
+        batch.write_loc = self._write_loc_buf[:num_reqs].clone()
+        batch.cache_seqlens = self._cache_seqlens_buf[:num_reqs].clone()
+        batch.block_table = self._block_table_buf[:num_reqs]
+        batch.req_to_token = self._req_to_token_buf[:num_reqs]
         return batch

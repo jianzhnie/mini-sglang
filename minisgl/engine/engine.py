@@ -16,7 +16,15 @@ from minisgl.engine.context import BatchContext
 from minisgl.engine.kvcache.pool import KVCachePool
 from minisgl.models.attention.backend import AttentionBackend
 from minisgl.sampling.sampler import Sampler
-from minisgl.utils.device import get_device, init_distributed
+from minisgl.utils.device import (
+    get_device,
+    get_device_type,
+    init_distributed,
+    is_accelerator_available,
+    is_npu_available,
+    mem_get_info,
+    synchronize,
+)
 from minisgl.utils.logger import logger
 from minisgl.utils.weights import load_hf_weights, load_weights_parallel
 
@@ -41,7 +49,8 @@ def _get_remap_fn(model_type: str):
 class Engine:
     """Core inference engine.
 
-    Holds the model, KV cache pool, CUDA graphs, and runs forward + sampling.
+    Holds the model, KV cache pool, execution graphs, and runs forward + sampling.
+    Supports CUDA, NPU (Ascend), and CPU devices.
     Supports context manager protocol for resource cleanup.
     """
 
@@ -56,9 +65,10 @@ class Engine:
         self.tp_rank = tp_rank
         self.tp_size = server_args.tp_size
         self.device = get_device()
+        self._device_type = get_device_type()
 
         if self.tp_size > 1:
-            init_distributed(tp_rank=tp_rank, tp_size=self.tp_size, backend="nccl")
+            init_distributed(tp_rank=tp_rank, tp_size=self.tp_size)
 
         AttentionBackend.configure(server_args.attention_backend)
 
@@ -94,17 +104,19 @@ class Engine:
 
         self.sampler = Sampler(model_args.vocab_size)
 
-        self.cuda_graphs: dict[int, torch.cuda.CUDAGraph] = {}
+        self._graphs: dict[int, object] = {}
         self._graph_inputs: dict[int, tuple] = {}
         self._graph_outputs: dict[int, torch.Tensor] = {}
         if (
             server_args.cuda_graph_bs
             and server_args.cuda_graph_bs > 0
-            and torch.cuda.is_available()
+            and is_accelerator_available()
         ):
-            self._capture_cuda_graphs()
+            self._capture_graphs()
 
-        logger.info("Engine initialized on rank %d", tp_rank)
+        logger.info(
+            "Engine initialized on rank %d (device=%s)", tp_rank, self._device_type
+        )
 
     def __enter__(self) -> "Engine":
         return self
@@ -113,14 +125,13 @@ class Engine:
         self.cleanup()
 
     def cleanup(self) -> None:
-        """Release GPU resources."""
-        self.cuda_graphs.clear()
+        """Release accelerator resources."""
+        self._graphs.clear()
         self._graph_inputs.clear()
         self._graph_outputs.clear()
         if hasattr(self, "kv_cache_pool"):
             del self.kv_cache_pool
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        synchronize()
 
     def __del__(self) -> None:
         with contextlib.suppress(Exception):
@@ -134,17 +145,16 @@ class Engine:
         return create_model(self.model_args, model_type)
 
     def _allocate_kv_cache(self) -> KVCachePool:
-        """Allocate KV cache based on available GPU memory."""
+        """Allocate KV cache based on available accelerator memory."""
         args = self.server_args
         ma = self.model_args
 
-        if torch.cuda.is_available():
-            free_mem, total_mem = torch.cuda.mem_get_info(self.device)
+        if is_accelerator_available():
+            free_mem, total_mem = mem_get_info(self.device)
             used_mem = total_mem - free_mem
             available_mem = int(total_mem * args.memory_ratio - used_mem)
         else:
-            # CPU: use a reasonable default
-            available_mem = 512 * 1024 * 1024  # 512 MB
+            available_mem = 512 * 1024 * 1024  # 512 MB for CPU
 
         dtype_itemsize = self.model.lm_head.weight.dtype.itemsize
         bytes_per_page = (
@@ -196,7 +206,7 @@ class Engine:
                     cu_seqlens_q=batch.cu_seqlens_q,
                 )
 
-        # Decode: try CUDA graph first, fall back to eager
+        # Decode: try execution graph first, fall back to eager
         bs = len(batch.reqs)
         graph = self._find_graph(bs)
         if graph is not None and batch.write_loc is not None:
@@ -205,7 +215,7 @@ class Engine:
                 ins["input_ids"][:bs].copy_(batch.input_ids.squeeze(1))
                 ins["positions"][:bs].copy_(batch.positions.squeeze(1))
                 ins["write_loc"][:bs].copy_(batch.write_loc)
-                self.cuda_graphs[graph_bs].replay()
+                self._graphs[graph_bs].replay()
                 return outs[:bs]
         else:
             with torch.inference_mode():
@@ -221,8 +231,8 @@ class Engine:
                 )
 
     def _find_graph(self, batch_size: int) -> tuple | None:
-        """Find a CUDA graph large enough for the given batch size."""
-        for bs in sorted(self.cuda_graphs.keys()):
+        """Find an execution graph large enough for the given batch size."""
+        for bs in sorted(self._graphs.keys()):
             if bs >= batch_size:
                 return (bs, self._graph_inputs[bs], self._graph_outputs[bs])
         return None
@@ -253,7 +263,13 @@ class Engine:
         return []
 
     def _sample_batched(self, logits: torch.Tensor, reqs: list) -> list:
-        """Batch sample by grouping requests with identical sampling params."""
+        """Batch sample by grouping requests with identical sampling params.
+
+        Fast path: if all requests are greedy, skip grouping entirely.
+        """
+        if all(req.sampling_params.temperature <= 0.0 for req in reqs):
+            return logits.argmax(dim=-1).tolist()
+
         from collections import defaultdict
 
         groups: dict[tuple, list[int]] = defaultdict(list)
@@ -268,7 +284,6 @@ class Engine:
         token_ids = [0] * len(reqs)
         for indices in groups.values():
             batch_logits = logits[indices]
-            # All requests in this group share the same sampling params
             params = reqs[indices[0]].sampling_params
             tokens = self.sampler.sample(batch_logits, params)
             for j, idx in enumerate(indices):
@@ -276,30 +291,39 @@ class Engine:
 
         return token_ids
 
-    def _capture_cuda_graphs(self) -> None:
-        """Capture CUDA graphs for decode phase."""
-        if not torch.cuda.is_available():
-            logger.info("CUDA not available, skipping graph capture")
+    def _capture_graphs(self) -> None:
+        """Capture execution graphs for decode phase (CUDA or NPU)."""
+        if not is_accelerator_available():
+            logger.info("No accelerator available, skipping graph capture")
             return
 
         max_bs = min(self.server_args.cuda_graph_bs, self.server_args.max_running_req)
         batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
         batch_sizes = [bs for bs in batch_sizes if bs <= max_bs]
 
-        logger.info("Capturing CUDA graphs for batch sizes: %s", batch_sizes)
+        logger.info(
+            "Capturing %s graphs for batch sizes: %s",
+            self._device_type.upper(),
+            batch_sizes,
+        )
 
         for bs in batch_sizes:
             self._capture_graph_safe(bs)
 
     def _capture_graph_safe(self, batch_size: int) -> None:
-        """Capture a CUDA graph, logging but not raising on failure."""
+        """Capture an execution graph, logging but not raising on failure."""
         try:
             self._capture_graph(batch_size)
         except RuntimeError as e:
-            logger.warning("Failed to capture CUDA graph for bs=%d: %s", batch_size, e)
+            logger.warning(
+                "Failed to capture graph for bs=%d: %s", batch_size, e
+            )
 
     def _capture_graph(self, batch_size: int) -> None:
-        """Capture a single CUDA graph for a given batch size."""
+        """Capture a single execution graph for a given batch size.
+
+        Supports both CUDA graphs and NPU graphs (via torch.npu).
+        """
         device = self.device
 
         input_ids = torch.ones(batch_size, dtype=torch.long, device=device)
@@ -317,17 +341,30 @@ class Engine:
                     write_loc=write_loc,
                 )
 
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            output = self.model(
-                input_ids=input_ids,
-                positions=positions,
-                k_cache=self.k_cache,
-                v_cache=self.v_cache,
-                write_loc=write_loc,
-            )
+        if self._device_type == "npu":
+            import os
+            os.environ.setdefault("TASK_QUEUE_ENABLE", "1")
+            graph = torch.npu.NPUGraph()
+            with torch.npu.graph(graph):
+                output = self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    k_cache=self.k_cache,
+                    v_cache=self.v_cache,
+                    write_loc=write_loc,
+                )
+        else:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                output = self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    k_cache=self.k_cache,
+                    v_cache=self.v_cache,
+                    write_loc=write_loc,
+                )
 
-        self.cuda_graphs[batch_size] = graph
+        self._graphs[batch_size] = graph
         self._graph_inputs[batch_size] = {
             "input_ids": input_ids,
             "positions": positions,

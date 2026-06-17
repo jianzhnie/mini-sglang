@@ -915,6 +915,285 @@ class TestSharedDecoder(unittest.TestCase):
         self.assertIs(MistralMLP, GatedMLP)
 
 
+# ── Test End-to-End Scheduler Loop ──
+class TestEndToEndScheduler(unittest.TestCase):
+    """Integration tests for the full Engine+Scheduler pipeline on CPU."""
+
+    def _make_engine_scheduler(self):
+        import json
+        import tempfile
+
+        from minisgl.config import ModelArgs, ServerArgs
+        from minisgl.engine.engine import Engine
+        from minisgl.scheduler.scheduler import Scheduler
+        from minisgl.utils.device import get_device
+
+        tmpdir = tempfile.mkdtemp()
+        config = {
+            "architectures": ["OPTForCausalLM"],
+            "hidden_size": 128,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+            "intermediate_size": 512,
+            "vocab_size": 256,
+            "max_position_embeddings": 64,
+            "ffn_dim": 512,
+            "eos_token_id": 2,
+        }
+        import os
+        with open(os.path.join(tmpdir, "config.json"), "w") as f:
+            json.dump(config, f)
+
+        model_args = ModelArgs.from_pretrained(tmpdir)
+        server_args = ServerArgs(
+            model_path=tmpdir,
+            tp_size=1,
+            attention_backend="pt",
+            max_running_req=4,
+            max_seq_len=64,
+            page_size=8,
+            memory_ratio=0.5,
+            cuda_graph_bs=0,
+        )
+        engine = Engine(server_args, model_args, tp_rank=0)
+        device = get_device()
+        for param in engine.model.parameters():
+            if param.dim() >= 2:
+                nn.init.normal_(param, std=0.02)
+            elif param.dim() == 1:
+                nn.init.ones_(param)
+        scheduler = Scheduler(server_args, engine)
+        return scheduler
+
+    def test_single_request_generation(self):
+        from minisgl.config import SamplingParams
+
+        scheduler = self._make_engine_scheduler()
+        scheduler.add_request([1, 5, 10], SamplingParams(temperature=0.0, max_tokens=5))
+        generated = []
+        steps = 0
+        while not scheduler.is_idle() and steps < 100:
+            for _uid, token_id, finished in scheduler.step():
+                generated.append(token_id)
+            steps += 1
+        self.assertGreater(len(generated), 0)
+        self.assertLessEqual(len(generated), 5)
+
+    def test_multi_request_concurrent(self):
+        from minisgl.config import SamplingParams
+
+        scheduler = self._make_engine_scheduler()
+        uid1 = scheduler.add_request([1, 2, 3], SamplingParams(temperature=0.0, max_tokens=3))
+        uid2 = scheduler.add_request([4, 5, 6], SamplingParams(temperature=0.0, max_tokens=3))
+        results = {uid1: [], uid2: []}
+        steps = 0
+        while not scheduler.is_idle() and steps < 100:
+            for uid, token_id, finished in scheduler.step():
+                results[uid].append(token_id)
+            steps += 1
+        self.assertGreater(len(results[uid1]), 0)
+        self.assertGreater(len(results[uid2]), 0)
+
+    def test_eos_terminates_early(self):
+        from minisgl.config import SamplingParams
+
+        scheduler = self._make_engine_scheduler()
+        self.assertIsInstance(scheduler.eos_token_id, set)
+        self.assertIn(2, scheduler.eos_token_id)
+
+
+# ── Test PyTorch Attention Decode Path ──
+class TestPyTorchBackendDecode(unittest.TestCase):
+    def test_decode_with_valid_mask(self):
+        from minisgl.models.attention.backend import PyTorchBackend
+
+        q = torch.randn(2, 4, 1, 32)
+        k_cache = torch.randn(10, 16, 4, 32)
+        v_cache = torch.randn(10, 16, 4, 32)
+
+        req_to_token = torch.full((2, 8), -1, dtype=torch.int32)
+        req_to_token[0, :3] = torch.tensor([0, 1, 2])
+        req_to_token[1, :5] = torch.tensor([16, 17, 18, 19, 20])
+        cache_seqlens = torch.tensor([3, 5], dtype=torch.int32)
+
+        out = PyTorchBackend.forward(
+            q, q[:, :, :, :], q[:, :, :, :],
+            k_cache=k_cache, v_cache=v_cache,
+            req_to_token=req_to_token,
+            cache_seqlens=cache_seqlens,
+        )
+        self.assertEqual(out.shape, (2, 4, 1, 32))
+        self.assertFalse(torch.isnan(out).any())
+
+    def test_prefill_varlen(self):
+        from minisgl.models.attention.backend import PyTorchBackend
+
+        q = torch.randn(1, 4, 8, 32)
+        k = torch.randn(1, 4, 8, 32)
+        v = torch.randn(1, 4, 8, 32)
+        cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32)
+
+        out = PyTorchBackend.forward(q, k, v, cu_seqlens_q=cu_seqlens)
+        self.assertEqual(out.shape, (1, 4, 8, 32))
+        self.assertFalse(torch.isnan(out).any())
+
+
+# ── Test EOS Normalization ──
+class TestEOSNormalization(unittest.TestCase):
+    def test_int_eos(self):
+        from minisgl.scheduler.scheduler import Scheduler
+
+        result = Scheduler._normalize_eos(2)
+        self.assertEqual(result, {2})
+
+    def test_list_eos(self):
+        from minisgl.scheduler.scheduler import Scheduler
+
+        result = Scheduler._normalize_eos([151645, 151643])
+        self.assertEqual(result, {151645, 151643})
+
+    def test_dict_eos(self):
+        from minisgl.scheduler.scheduler import Scheduler
+
+        result = Scheduler._normalize_eos({"token_id": 2})
+        self.assertEqual(result, {2})
+
+
+# ── Test Sampling Edge Cases ──
+class TestSamplerEdgeCases(unittest.TestCase):
+    def test_single_token_batch(self):
+        from minisgl.config import SamplingParams
+        from minisgl.sampling.sampler import Sampler
+
+        sampler = Sampler(100)
+        logits = torch.randn(1, 100)
+        params = SamplingParams(temperature=0.0)
+        tokens = sampler.sample(logits, params)
+        self.assertEqual(tokens.shape, (1,))
+        self.assertEqual(tokens[0].item(), logits.argmax(dim=-1)[0].item())
+
+    def test_top_k_equals_vocab(self):
+        from minisgl.sampling.sampler import _apply_top_k
+
+        logits = torch.randn(1, 50)
+        filtered = _apply_top_k(logits.clone(), 50)
+        self.assertTrue(torch.equal(logits, filtered))
+
+    def test_very_low_temperature(self):
+        from minisgl.config import SamplingParams
+        from minisgl.sampling.sampler import Sampler
+
+        sampler = Sampler(100)
+        logits = torch.randn(4, 100)
+        params = SamplingParams(temperature=0.01)
+        tokens = sampler.sample(logits, params)
+        expected = logits.argmax(dim=-1)
+        self.assertTrue(torch.equal(tokens, expected))
+
+
+# ── Test FrontendManager ──
+class TestFrontendManager(unittest.TestCase):
+    def test_submit_and_get_queue(self):
+        import queue
+
+        from minisgl.config import SamplingParams, ServerArgs
+        from minisgl.server.frontend import FrontendManager
+
+        class MockScheduler:
+            _uid = 0
+            def add_request(self, input_ids, sampling_params):
+                uid = self._uid
+                self._uid += 1
+                return uid
+            def is_idle(self):
+                return True
+            def step(self):
+                return []
+
+        args = ServerArgs(model_path="/tmp/test")
+        fm = FrontendManager(args, MockScheduler(), None)
+        uid = fm.submit_request([1, 2, 3], SamplingParams())
+        self.assertEqual(uid, 0)
+        q = fm.get_result_queue(uid)
+        self.assertIsInstance(q, queue.Queue)
+        fm.remove_result(uid)
+        self.assertIsNone(fm.get_result_queue(uid))
+
+
+# ── Test Device Utilities (NPU-aware) ──
+class TestDeviceUtils(unittest.TestCase):
+    def test_get_device_type(self):
+        from minisgl.utils.device import get_device_type
+
+        dtype = get_device_type()
+        self.assertIn(dtype, ("cpu", "cuda", "npu"))
+
+    def test_is_npu_available(self):
+        from minisgl.utils.device import is_npu_available
+
+        result = is_npu_available()
+        self.assertIsInstance(result, bool)
+
+    def test_is_accelerator_available(self):
+        from minisgl.utils.device import is_accelerator_available
+
+        result = is_accelerator_available()
+        self.assertIsInstance(result, bool)
+
+    def test_synchronize_cpu(self):
+        from minisgl.utils.device import synchronize
+
+        synchronize()
+
+    def test_mem_get_info_cpu(self):
+        from minisgl.utils.device import mem_get_info
+
+        free, total = mem_get_info(torch.device("cpu"))
+        self.assertEqual(free, 0)
+        self.assertEqual(total, 0)
+
+    def test_set_device_cpu(self):
+        from minisgl.utils.device import get_device, reset_device_state, set_device
+
+        reset_device_state()
+        set_device(torch.device("cpu"))
+        self.assertEqual(get_device().type, "cpu")
+        reset_device_state()
+
+    def test_init_distributed_auto_backend(self):
+        from minisgl.utils.device import get_device_type
+
+        dtype = get_device_type()
+        if dtype == "npu":
+            expected_backend = "hccl"
+        elif dtype == "cuda":
+            expected_backend = "nccl"
+        else:
+            expected_backend = "gloo"
+        self.assertIn(expected_backend, ("hccl", "nccl", "gloo"))
+
+
+# ── Test ServerArgs Device Config ──
+class TestServerArgsDevice(unittest.TestCase):
+    def test_device_field_default(self):
+        from minisgl.config import ServerArgs
+
+        args = ServerArgs(model_path="/tmp/test")
+        self.assertEqual(args.device, "auto")
+
+    def test_attention_backend_pt(self):
+        from minisgl.models.attention.backend import AttentionBackend, PyTorchBackend
+
+        AttentionBackend.configure("pt")
+        q = torch.randn(1, 4, 8, 32)
+        k = torch.randn(1, 4, 8, 32)
+        v = torch.randn(1, 4, 8, 32)
+        out = AttentionBackend.forward(q, k, v)
+        self.assertEqual(out.shape, q.shape)
+        AttentionBackend.configure("fa")
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("Mini-SGLang CPU Core Test Suite")

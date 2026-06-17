@@ -81,9 +81,9 @@ class RadixCacheManager:
                 break
             if node.ref_count == 0 and node.cache_handle is not None:
                 pages = node.cache_handle.num_pages()
+                evicted.append(node.cache_handle)
                 self.pool.free(node.cache_handle)
                 remaining -= pages
-                evicted.append(node.cache_handle)
                 node.cache_handle = None
                 if node.parent and not node.children:
                     del node.parent.children[node.token]
