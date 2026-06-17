@@ -186,6 +186,15 @@ curl http://127.0.0.1:8000/health
 
 ## 示例
 
+```
+examples/
+├── cpu_demo.py          # 零依赖 CPU 自包含 demo（无需下载模型）
+├── offline_inference.py # 综合离线推理：批量生成、LLM API、流式、采样策略
+├── benchmark.py         # 性能基准：prefill 延迟、decode 吞吐、端到端
+├── server_demo.py       # OpenAI 兼容 API 服务 + 自动化测试
+└── npu_inference.py     # 华为 Ascend NPU 推理 + 多模型测试
+```
+
 ### CPU 自包含 Demo（无需下载模型）
 
 ```bash
@@ -194,49 +203,13 @@ python examples/cpu_demo.py
 
 创建一个临时的随机权重小模型，验证完整的 Engine → Scheduler → Generate 管线。
 
-### Engine + Scheduler 直接使用
+### 综合离线推理
 
 ```bash
-python examples.py --model-path /path/to/model
+python examples/offline_inference.py --model-path /path/to/model
 ```
 
-### 批量推理（并发多 Prompt）
-
-```bash
-python examples/batch_inference.py --model-path /path/to/model
-```
-
-多条 prompt 同时提交，Scheduler 自动 batch 处理，各 prompt 输出独立不干扰。
-
-### 高层 LLM API
-
-```bash
-python examples/llm_generate.py --model-path /path/to/model
-```
-
-演示 `LLM.generate()` 文本续写和 `LLM.chat()` 对话接口。
-
-### OpenAI 兼容 API 服务
-
-```bash
-python server_demo.py --model-path /path/to/model
-```
-
-启动 FastAPI 服务器，自动测试 health check / sync completion / SSE streaming / chat。
-
-### 采样策略对比 Demo（无需下载模型）
-
-```bash
-python examples/sampling_demo.py
-```
-
-对比 greedy / temperature / top-k / top-p 不同采样策略对生成多样性的影响。
-
-### 流式生成（含性能统计）
-
-```bash
-python examples/streaming_demo.py --model-path /path/to/model
-```
+涵盖：Engine+Scheduler 批量推理、LLM.generate()/chat() 高级 API、流式逐 token 生成（含 TTFT/吞吐指标）、采样策略对比（greedy/temperature/top-p/top-k）。
 
 ### 性能基准测试
 
@@ -244,10 +217,19 @@ python examples/streaming_demo.py --model-path /path/to/model
 python examples/benchmark.py --model-path /path/to/model
 ```
 
-### 多轮对话
+### OpenAI 兼容 API 服务
 
 ```bash
-python examples/multi_turn_chat.py --model-path /path/to/model
+python examples/server_demo.py --model-path /path/to/model
+```
+
+启动 FastAPI 服务器，自动测试 health check / sync completion / SSE streaming / chat。
+
+### NPU 推理
+
+```bash
+python examples/npu_inference.py --model-path /path/to/model --device npu
+python examples/npu_inference.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5-1.5B
 ```
 
 ## 华为 Ascend NPU 支持
@@ -271,11 +253,11 @@ docker run --privileged --shm-size=16g \
   torchtitan-npu:cann9.0.0-torch2.12.0 \
   python -m minisgl --model-path /models/Qwen3-0.6B --device npu --attention-backend pt
 
-# NPU 推理 Demo
-python examples/npu_demo.py --model-path /path/to/Qwen3-0.6B --device npu
+# NPU 单模型推理
+python examples/npu_inference.py --model-path /path/to/Qwen3-0.6B --device npu
 
-# 多模型 NPU 测试
-python examples/npu_multi_model_test.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5-1.5B
+# NPU 多模型批量测试
+python examples/npu_inference.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5-1.5B Qwen3-1.7B
 ```
 
 ### NPU 适配要点
@@ -295,14 +277,16 @@ python examples/npu_multi_model_test.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5
 
 | 模型 | 状态 | 加载时间 | Prefill | Decode | 批量(3x)吞吐 |
 |------|------|---------|---------|--------|-------------|
-| **Qwen2.5-0.5B** | PASS | 5.1s | 522.1 tok/s | 31.6 tok/s | 91.9 tok/s |
-| **Qwen2.5-1.5B** | PASS | 15.3s | 451.8 tok/s | 24.4 tok/s | 73.8 tok/s |
-| **Qwen2.5-3B** | PASS | 43.3s | 47.1 tok/s | 13.4 tok/s | 52.5 tok/s |
-| **Qwen3-0.6B** | PASS | 11.1s | 68.7 tok/s | 18.0 tok/s | 67.8 tok/s |
-| **Qwen3-1.7B** | PASS | 13.2s | 440.9 tok/s | 24.1 tok/s | 69.9 tok/s |
-| **Qwen3-4B** | PASS | 31.7s | 41.5 tok/s | 10.5 tok/s | 39.3 tok/s |
+| **Qwen2.5-0.5B** | PASS | 5.3s | 395.5 tok/s | 24.2 tok/s | 72.6 tok/s |
+| **Qwen2.5-1.5B** | PASS | 14.6s | 336.5 tok/s | 20.8 tok/s | 60.8 tok/s |
+| **Qwen2.5-3B** | PASS | 39.8s | 294.7 tok/s | 15.9 tok/s | 45.9 tok/s |
+| **Qwen3-0.6B** | PASS | 13.0s | 57.4 tok/s | 14.3 tok/s | 54.0 tok/s |
+| **Qwen3-1.7B** | PASS | 13.0s | 201.4 tok/s | 13.5 tok/s | 36.0 tok/s |
+| **Qwen3-4B** | PASS | 24.4s | 260.9 tok/s | 13.0 tok/s | 39.2 tok/s |
 
 > 6/6 模型全部通过，生成结果语义正确。Eager 模式推理稳定可靠。
+>
+> 测试命令：`python examples/npu_inference.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5-1.5B Qwen3-1.7B Qwen2.5-3B Qwen3-4B --max-tokens 30`
 
 ## 支持的模型
 
