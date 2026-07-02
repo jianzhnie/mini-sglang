@@ -93,8 +93,9 @@ class BaseAttention(nn.Module):
         flat_v = v_cache.view(-1, num_kv_heads, head_dim)
         flat_in_k = k.transpose(1, 2).reshape(-1, num_kv_heads, head_dim)
         flat_in_v = v.transpose(1, 2).reshape(-1, num_kv_heads, head_dim)
-        flat_k[write_loc] = flat_in_k
-        flat_v[write_loc] = flat_in_v
+        idx = write_loc.long()
+        flat_k[idx] = flat_in_k
+        flat_v[idx] = flat_in_v
 
     def _reshape_output(
         self,

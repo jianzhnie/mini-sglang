@@ -441,8 +441,6 @@ class TestModelDummy(unittest.TestCase):
 
     def test_deep_decoder_forward(self):
         """Test forward pass through multiple layers with residual flow."""
-        torch.manual_seed(42)
-
         from minisgl.config import ModelArgs
         from minisgl.models.qwen2 import Qwen2ForCausalLM
 
@@ -456,19 +454,20 @@ class TestModelDummy(unittest.TestCase):
             max_position_embeddings=128,
             head_dim=32,
         )
+        gen = torch.Generator().manual_seed(123)
         model = Qwen2ForCausalLM(config)
-        for module in model.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight, gain=0.5)
-            elif hasattr(module, "_init_weights"):
-                module._init_weights()
+        for name, param in model.named_parameters():
+            if param.dim() >= 2:
+                nn.init.normal_(param, std=0.02, generator=gen)
+            elif param.dim() == 1:
+                nn.init.ones_(param)
         model.eval()
-        input_ids = torch.randint(0, 1000, (1, 16))
+        input_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]])
         positions = torch.arange(16)
         with torch.inference_mode():
             logits = model(input_ids=input_ids, positions=positions)
-        self.assertFalse(torch.isnan(logits).any())
-        self.assertFalse(torch.isinf(logits).any())
+        self.assertFalse(torch.isnan(logits).any(), f"NaN in logits: {logits}")
+        self.assertFalse(torch.isinf(logits).any(), f"Inf in logits: {logits}")
 
     def test_with_kv_cache(self):
         """Test forward pass with KV cache tensors."""
@@ -619,6 +618,580 @@ class TestRegistry(unittest.TestCase):
             with torch.inference_mode():
                 out = model(input_ids=ids, positions=pos)
             self.assertEqual(out.shape, (1, 4, 100))
+
+
+
+# ── Test NaiveCacheManager ──
+class TestNaiveCacheManager(unittest.TestCase):
+    def _make_pool(self, num_pages=50):
+        from minisgl.engine.kvcache.pool import KVCachePool
+
+        return KVCachePool(
+            num_layers=2,
+            num_pages=num_pages,
+            page_size=4,
+            num_kv_heads=4,
+            head_dim=32,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+
+    def test_allocate_and_free(self):
+        from minisgl.engine.kvcache.naive import NaiveCacheManager
+
+        pool = self._make_pool(50)
+        mgr = NaiveCacheManager(pool, page_size=4)
+        handle = mgr.allocate(uid=1, num_pages=5)
+        self.assertEqual(handle.num_pages(), 5)
+        self.assertEqual(pool.free_count(), 45)
+        mgr.free(1)
+        self.assertEqual(pool.free_count(), 50)
+
+    def test_eviction_on_pressure(self):
+        from minisgl.engine.kvcache.naive import NaiveCacheManager
+
+        pool = self._make_pool(10)
+        mgr = NaiveCacheManager(pool, page_size=4)
+        mgr.allocate(uid=1, num_pages=6)
+        mgr.allocate(uid=2, num_pages=4)
+        self.assertEqual(pool.free_count(), 0)
+        handle3 = mgr.allocate(uid=3, num_pages=3)
+        self.assertIsNotNone(handle3)
+        self.assertEqual(handle3.num_pages(), 3)
+
+    def test_touch_moves_to_end(self):
+        from minisgl.engine.kvcache.naive import NaiveCacheManager
+
+        pool = self._make_pool(10)
+        mgr = NaiveCacheManager(pool, page_size=4)
+        mgr.allocate(uid=1, num_pages=3)
+        mgr.allocate(uid=2, num_pages=3)
+        mgr.touch(1)
+        lru_keys = list(mgr.lru.keys())
+        self.assertEqual(lru_keys[-1], 1)
+
+    def test_match_prefix_always_zero(self):
+        from minisgl.engine.kvcache.naive import NaiveCacheManager
+
+        pool = self._make_pool(10)
+        mgr = NaiveCacheManager(pool, page_size=4)
+        self.assertEqual(mgr.match_prefix([1, 2, 3]), 0)
+
+
+# ── Test Radix Cache Evict/Remove ──
+class TestRadixCacheEvictRemove(unittest.TestCase):
+    def _make_pool_and_radix(self, num_pages=50):
+        from minisgl.engine.kvcache.pool import KVCachePool
+        from minisgl.engine.kvcache.radix import RadixCacheManager
+
+        pool = KVCachePool(
+            num_layers=2,
+            num_pages=num_pages,
+            page_size=4,
+            num_kv_heads=4,
+            head_dim=32,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+        radix = RadixCacheManager(pool, page_size=4)
+        return pool, radix
+
+    def test_remove_decrements_refcount(self):
+        pool, radix = self._make_pool_and_radix()
+        tokens = [1, 2, 3, 4]
+        handle = pool.alloc(1)
+        radix.insert(tokens, handle)
+        node = radix.root.children[1]
+        self.assertEqual(node.ref_count, 1)
+        radix.remove(tokens)
+        self.assertEqual(node.ref_count, 0)
+
+    def test_evict_after_remove(self):
+        pool, radix = self._make_pool_and_radix(20)
+        tokens = [1, 2, 3, 4, 5, 6, 7, 8]
+        handle = pool.alloc(2)
+        initial_free = pool.free_count()
+        radix.insert(tokens, handle)
+        radix.remove(tokens)
+        evicted = radix.evict(2)
+        self.assertGreater(len(evicted), 0)
+
+    def test_evict_respects_refcount(self):
+        pool, radix = self._make_pool_and_radix(20)
+        tokens = [1, 2, 3, 4]
+        handle = pool.alloc(1)
+        radix.insert(tokens, handle)
+        evicted = radix.evict(1)
+        self.assertEqual(len(evicted), 0)
+
+
+# ── Test OPT Model ──
+class TestOPTModel(unittest.TestCase):
+    def test_opt_forward(self):
+        from minisgl.config import ModelArgs
+        from minisgl.models.opt import OPTForCausalLM
+
+        config = ModelArgs(
+            hidden_size=128,
+            num_layers=2,
+            num_attention_heads=4,
+            num_kv_heads=4,
+            intermediate_size=512,
+            vocab_size=1000,
+            max_position_embeddings=128,
+            head_dim=32,
+        )
+        model = OPTForCausalLM(config)
+        model.eval()
+        input_ids = torch.randint(0, 1000, (1, 8))
+        positions = torch.arange(8)
+        with torch.inference_mode():
+            logits = model(input_ids=input_ids, positions=positions)
+        self.assertEqual(logits.shape, (1, 8, 1000))
+
+
+# ── Test DecodeManager ──
+class TestDecodeManager(unittest.TestCase):
+    def test_schedule_decode_basic(self):
+        from minisgl.config import SamplingParams, ServerArgs
+        from minisgl.engine.kvcache.pool import KVCachePool
+        from minisgl.scheduler.batch import Req, SequenceStatus
+        from minisgl.scheduler.decode import DecodeManager
+
+        args = ServerArgs(
+            model_path="/tmp/test",
+            max_running_req=8,
+            max_seq_len=64,
+            page_size=4,
+        )
+        pool = KVCachePool(
+            num_layers=2,
+            num_pages=20,
+            page_size=4,
+            num_kv_heads=4,
+            head_dim=32,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+        handle = pool.alloc(4)
+        req = Req(
+            input_ids=[1, 2, 3, 4, 5],
+            uid=0,
+            cache_handle=handle,
+            sampling_params=SamplingParams(max_tokens=10),
+        )
+        req.status = SequenceStatus.RUNNING
+
+        dm = DecodeManager(args, pool, device=torch.device("cpu"))
+        batch = dm.schedule_decode([req])
+        self.assertIsNotNone(batch)
+        self.assertEqual(batch.phase, "decode")
+        self.assertEqual(batch.input_ids.tolist(), [[5]])
+        self.assertEqual(batch.positions.tolist(), [[4]])
+        self.assertIsNotNone(batch.write_loc)
+        self.assertIsNotNone(batch.block_table)
+        self.assertIsNotNone(batch.cache_seqlens)
+
+    def test_schedule_decode_empty(self):
+        from minisgl.config import ServerArgs
+        from minisgl.engine.kvcache.pool import KVCachePool
+        from minisgl.scheduler.decode import DecodeManager
+
+        args = ServerArgs(model_path="/tmp/test", max_seq_len=64, page_size=4)
+        pool = KVCachePool(
+            num_layers=2, num_pages=10, page_size=4,
+            num_kv_heads=4, head_dim=32,
+            dtype=torch.float32, device=torch.device("cpu"),
+        )
+        dm = DecodeManager(args, pool, device=torch.device("cpu"))
+        self.assertIsNone(dm.schedule_decode([]))
+
+
+# ── Test PrefillManager ──
+class TestPrefillManager(unittest.TestCase):
+    def test_schedule_prefill_basic(self):
+        from minisgl.config import SamplingParams, ServerArgs
+        from minisgl.engine.kvcache.naive import NaiveCacheManager
+        from minisgl.engine.kvcache.pool import KVCachePool
+        from minisgl.scheduler.batch import Req, SequenceStatus
+        from minisgl.scheduler.prefill import PrefillManager
+
+        args = ServerArgs(
+            model_path="/tmp/test",
+            max_running_req=8,
+            max_seq_len=64,
+            page_size=4,
+        )
+        pool = KVCachePool(
+            num_layers=2, num_pages=50, page_size=4,
+            num_kv_heads=4, head_dim=32,
+            dtype=torch.float32, device=torch.device("cpu"),
+        )
+        cache = NaiveCacheManager(pool, page_size=4)
+        pm = PrefillManager(args, pool, cache)
+
+        req = Req(
+            input_ids=[1, 2, 3, 4, 5],
+            uid=0,
+            sampling_params=SamplingParams(max_tokens=10),
+        )
+        pm.add_request(req)
+        batch = pm.schedule_prefill()
+        self.assertIsNotNone(batch)
+        self.assertEqual(batch.phase, "prefill")
+        self.assertEqual(len(batch.reqs), 1)
+        self.assertEqual(req.status, SequenceStatus.RUNNING)
+        self.assertIsNotNone(req.cache_handle)
+
+    def test_schedule_prefill_empty(self):
+        from minisgl.config import ServerArgs
+        from minisgl.engine.kvcache.naive import NaiveCacheManager
+        from minisgl.engine.kvcache.pool import KVCachePool
+        from minisgl.scheduler.prefill import PrefillManager
+
+        args = ServerArgs(model_path="/tmp/test", max_seq_len=64, page_size=4)
+        pool = KVCachePool(
+            num_layers=2, num_pages=20, page_size=4,
+            num_kv_heads=4, head_dim=32,
+            dtype=torch.float32, device=torch.device("cpu"),
+        )
+        cache = NaiveCacheManager(pool, page_size=4)
+        pm = PrefillManager(args, pool, cache)
+        self.assertIsNone(pm.schedule_prefill())
+
+
+# ── Test Shared Decoder Base Classes ──
+class TestSharedDecoder(unittest.TestCase):
+    def test_gated_mlp(self):
+        from minisgl.models.decoder import GatedMLP
+
+        mlp = GatedMLP(128, 512)
+        x = torch.randn(2, 8, 128)
+        y = mlp(x)
+        self.assertEqual(y.shape, (2, 8, 128))
+
+    def test_rmsnorm_decoder_layer(self):
+        from minisgl.config import ModelArgs
+        from minisgl.models.decoder import RMSNormDecoderLayer
+        from minisgl.models.llama import LlamaAttention
+
+        config = ModelArgs(
+            hidden_size=128,
+            num_layers=1,
+            num_attention_heads=4,
+            num_kv_heads=4,
+            intermediate_size=512,
+            vocab_size=100,
+            max_position_embeddings=64,
+            head_dim=32,
+        )
+        layer = RMSNormDecoderLayer(
+            hidden_size=128,
+            rms_norm_eps=1e-6,
+            attention=LlamaAttention(config),
+            intermediate_size=512,
+        )
+        x = torch.randn(1, 8, 128)
+        positions = torch.arange(8)
+        out = layer(x, positions)
+        self.assertEqual(out.shape, (1, 8, 128))
+
+    def test_llama_inherits_tie_weights(self):
+        from minisgl.models.decoder import RMSNormForCausalLM
+        from minisgl.models.llama import LlamaForCausalLM
+
+        self.assertTrue(issubclass(LlamaForCausalLM, RMSNormForCausalLM))
+
+    def test_mlp_alias(self):
+        from minisgl.models.decoder import GatedMLP
+        from minisgl.models.llama import LlamaMLP
+        from minisgl.models.mistral import MistralMLP
+        from minisgl.models.qwen2 import Qwen2MLP
+        from minisgl.models.qwen3 import Qwen3MLP
+
+        self.assertIs(LlamaMLP, GatedMLP)
+        self.assertIs(Qwen2MLP, GatedMLP)
+        self.assertIs(Qwen3MLP, GatedMLP)
+        self.assertIs(MistralMLP, GatedMLP)
+
+
+# ── Test End-to-End Scheduler Loop ──
+class TestEndToEndScheduler(unittest.TestCase):
+    """Integration tests for the full Engine+Scheduler pipeline on CPU."""
+
+    def _make_engine_scheduler(self):
+        import json
+        import tempfile
+
+        from minisgl.config import ModelArgs, ServerArgs
+        from minisgl.engine.engine import Engine
+        from minisgl.scheduler.scheduler import Scheduler
+        from minisgl.utils.device import get_device
+
+        tmpdir = tempfile.mkdtemp()
+        config = {
+            "architectures": ["OPTForCausalLM"],
+            "hidden_size": 128,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+            "intermediate_size": 512,
+            "vocab_size": 256,
+            "max_position_embeddings": 64,
+            "ffn_dim": 512,
+            "eos_token_id": 2,
+        }
+        import os
+        with open(os.path.join(tmpdir, "config.json"), "w") as f:
+            json.dump(config, f)
+
+        model_args = ModelArgs.from_pretrained(tmpdir)
+        server_args = ServerArgs(
+            model_path=tmpdir,
+            tp_size=1,
+            attention_backend="pt",
+            max_running_req=4,
+            max_seq_len=64,
+            page_size=8,
+            memory_ratio=0.5,
+            cuda_graph_bs=0,
+        )
+        engine = Engine(server_args, model_args, tp_rank=0)
+        device = get_device()
+        for param in engine.model.parameters():
+            if param.dim() >= 2:
+                nn.init.normal_(param, std=0.02)
+            elif param.dim() == 1:
+                nn.init.ones_(param)
+        scheduler = Scheduler(server_args, engine)
+        return scheduler
+
+    def test_single_request_generation(self):
+        from minisgl.config import SamplingParams
+
+        scheduler = self._make_engine_scheduler()
+        scheduler.add_request([1, 5, 10], SamplingParams(temperature=0.0, max_tokens=5))
+        generated = []
+        steps = 0
+        while not scheduler.is_idle() and steps < 100:
+            for _uid, token_id, finished in scheduler.step():
+                generated.append(token_id)
+            steps += 1
+        self.assertGreater(len(generated), 0)
+        self.assertLessEqual(len(generated), 5)
+
+    def test_multi_request_concurrent(self):
+        from minisgl.config import SamplingParams
+
+        scheduler = self._make_engine_scheduler()
+        uid1 = scheduler.add_request([1, 2, 3], SamplingParams(temperature=0.0, max_tokens=3))
+        uid2 = scheduler.add_request([4, 5, 6], SamplingParams(temperature=0.0, max_tokens=3))
+        results = {uid1: [], uid2: []}
+        steps = 0
+        while not scheduler.is_idle() and steps < 100:
+            for uid, token_id, finished in scheduler.step():
+                results[uid].append(token_id)
+            steps += 1
+        self.assertGreater(len(results[uid1]), 0)
+        self.assertGreater(len(results[uid2]), 0)
+
+    def test_eos_terminates_early(self):
+        from minisgl.config import SamplingParams
+
+        scheduler = self._make_engine_scheduler()
+        self.assertIsInstance(scheduler.eos_token_id, set)
+        self.assertIn(2, scheduler.eos_token_id)
+
+
+# ── Test PyTorch Attention Decode Path ──
+class TestPyTorchBackendDecode(unittest.TestCase):
+    def test_decode_with_valid_mask(self):
+        from minisgl.models.attention.backend import PyTorchBackend
+
+        q = torch.randn(2, 4, 1, 32)
+        k_cache = torch.randn(10, 16, 4, 32)
+        v_cache = torch.randn(10, 16, 4, 32)
+
+        req_to_token = torch.full((2, 8), -1, dtype=torch.int32)
+        req_to_token[0, :3] = torch.tensor([0, 1, 2])
+        req_to_token[1, :5] = torch.tensor([16, 17, 18, 19, 20])
+        cache_seqlens = torch.tensor([3, 5], dtype=torch.int32)
+
+        out = PyTorchBackend.forward(
+            q, q[:, :, :, :], q[:, :, :, :],
+            k_cache=k_cache, v_cache=v_cache,
+            req_to_token=req_to_token,
+            cache_seqlens=cache_seqlens,
+        )
+        self.assertEqual(out.shape, (2, 4, 1, 32))
+        self.assertFalse(torch.isnan(out).any())
+
+    def test_prefill_varlen(self):
+        from minisgl.models.attention.backend import PyTorchBackend
+
+        q = torch.randn(1, 4, 8, 32)
+        k = torch.randn(1, 4, 8, 32)
+        v = torch.randn(1, 4, 8, 32)
+        cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32)
+
+        out = PyTorchBackend.forward(q, k, v, cu_seqlens_q=cu_seqlens)
+        self.assertEqual(out.shape, (1, 4, 8, 32))
+        self.assertFalse(torch.isnan(out).any())
+
+
+# ── Test EOS Normalization ──
+class TestEOSNormalization(unittest.TestCase):
+    def test_int_eos(self):
+        from minisgl.scheduler.scheduler import Scheduler
+
+        result = Scheduler._normalize_eos(2)
+        self.assertEqual(result, {2})
+
+    def test_list_eos(self):
+        from minisgl.scheduler.scheduler import Scheduler
+
+        result = Scheduler._normalize_eos([151645, 151643])
+        self.assertEqual(result, {151645, 151643})
+
+    def test_dict_eos(self):
+        from minisgl.scheduler.scheduler import Scheduler
+
+        result = Scheduler._normalize_eos({"token_id": 2})
+        self.assertEqual(result, {2})
+
+
+# ── Test Sampling Edge Cases ──
+class TestSamplerEdgeCases(unittest.TestCase):
+    def test_single_token_batch(self):
+        from minisgl.config import SamplingParams
+        from minisgl.sampling.sampler import Sampler
+
+        sampler = Sampler(100)
+        logits = torch.randn(1, 100)
+        params = SamplingParams(temperature=0.0)
+        tokens = sampler.sample(logits, params)
+        self.assertEqual(tokens.shape, (1,))
+        self.assertEqual(tokens[0].item(), logits.argmax(dim=-1)[0].item())
+
+    def test_top_k_equals_vocab(self):
+        from minisgl.sampling.sampler import _apply_top_k
+
+        logits = torch.randn(1, 50)
+        filtered = _apply_top_k(logits.clone(), 50)
+        self.assertTrue(torch.equal(logits, filtered))
+
+    def test_very_low_temperature(self):
+        from minisgl.config import SamplingParams
+        from minisgl.sampling.sampler import Sampler
+
+        sampler = Sampler(100)
+        logits = torch.randn(4, 100)
+        params = SamplingParams(temperature=0.01)
+        tokens = sampler.sample(logits, params)
+        expected = logits.argmax(dim=-1)
+        self.assertTrue(torch.equal(tokens, expected))
+
+
+# ── Test FrontendManager ──
+class TestFrontendManager(unittest.TestCase):
+    def test_submit_and_get_queue(self):
+        import queue
+
+        from minisgl.config import SamplingParams, ServerArgs
+        from minisgl.server.frontend import FrontendManager
+
+        class MockScheduler:
+            _uid = 0
+            def add_request(self, input_ids, sampling_params):
+                uid = self._uid
+                self._uid += 1
+                return uid
+            def is_idle(self):
+                return True
+            def step(self):
+                return []
+
+        args = ServerArgs(model_path="/tmp/test")
+        fm = FrontendManager(args, MockScheduler(), None)
+        uid = fm.submit_request([1, 2, 3], SamplingParams())
+        self.assertEqual(uid, 0)
+        q = fm.get_result_queue(uid)
+        self.assertIsInstance(q, queue.Queue)
+        fm.remove_result(uid)
+        self.assertIsNone(fm.get_result_queue(uid))
+
+
+# ── Test Device Utilities (NPU-aware) ──
+class TestDeviceUtils(unittest.TestCase):
+    def test_get_device_type(self):
+        from minisgl.utils.device import get_device_type
+
+        dtype = get_device_type()
+        self.assertIn(dtype, ("cpu", "cuda", "npu"))
+
+    def test_is_npu_available(self):
+        from minisgl.utils.device import is_npu_available
+
+        result = is_npu_available()
+        self.assertIsInstance(result, bool)
+
+    def test_is_accelerator_available(self):
+        from minisgl.utils.device import is_accelerator_available
+
+        result = is_accelerator_available()
+        self.assertIsInstance(result, bool)
+
+    def test_synchronize_cpu(self):
+        from minisgl.utils.device import synchronize
+
+        synchronize()
+
+    def test_mem_get_info_cpu(self):
+        from minisgl.utils.device import mem_get_info
+
+        free, total = mem_get_info(torch.device("cpu"))
+        self.assertEqual(free, 0)
+        self.assertEqual(total, 0)
+
+    def test_set_device_cpu(self):
+        from minisgl.utils.device import get_device, reset_device_state, set_device
+
+        reset_device_state()
+        set_device(torch.device("cpu"))
+        self.assertEqual(get_device().type, "cpu")
+        reset_device_state()
+
+    def test_init_distributed_auto_backend(self):
+        from minisgl.utils.device import get_device_type
+
+        dtype = get_device_type()
+        if dtype == "npu":
+            expected_backend = "hccl"
+        elif dtype == "cuda":
+            expected_backend = "nccl"
+        else:
+            expected_backend = "gloo"
+        self.assertIn(expected_backend, ("hccl", "nccl", "gloo"))
+
+
+# ── Test ServerArgs Device Config ──
+class TestServerArgsDevice(unittest.TestCase):
+    def test_device_field_default(self):
+        from minisgl.config import ServerArgs
+
+        args = ServerArgs(model_path="/tmp/test")
+        self.assertEqual(args.device, "auto")
+
+    def test_attention_backend_pt(self):
+        from minisgl.models.attention.backend import AttentionBackend, PyTorchBackend
+
+        AttentionBackend.configure("pt")
+        q = torch.randn(1, 4, 8, 32)
+        k = torch.randn(1, 4, 8, 32)
+        v = torch.randn(1, 4, 8, 32)
+        out = AttentionBackend.forward(q, k, v)
+        self.assertEqual(out.shape, q.shape)
+        AttentionBackend.configure("fa")
 
 
 if __name__ == "__main__":

@@ -61,10 +61,10 @@ class RotaryEmbedding:
         """
         self._ensure_cache(positions.max().item() + 1)
 
-        cos = self._cos_table[:, :, positions, :].to(q.device, dtype=q.dtype)
-        sin = self._sin_table[:, :, positions, :].to(k.device, dtype=k.dtype)
+        pos_cpu = positions.cpu().long()
+        cos = self._cos_table[:, :, pos_cpu, :].to(device=q.device, dtype=q.dtype)
+        sin = self._sin_table[:, :, pos_cpu, :].to(device=q.device, dtype=q.dtype)
 
-        # Reshape for batched decode: (1,1,N,head_dim) → (N,1,1,head_dim)
         if cos.dim() == 4 and cos.shape[2] > 1 and q.shape[2] == 1:
             cos = cos.permute(2, 0, 1, 3)
             sin = sin.permute(2, 0, 1, 3)

@@ -100,10 +100,14 @@ class FrontendManager:
         """Background thread running the scheduler loop."""
         logger.info("Scheduler event loop started")
         while self._running:
-            if self.scheduler.is_idle():
-                time.sleep(0.01)
-                continue
-            self.process_step()
+            try:
+                if self.scheduler.is_idle():
+                    time.sleep(0.01)
+                    continue
+                self.process_step()
+                time.sleep(0.001)
+            except Exception as exc:
+                logger.error("Scheduler event loop error: %s", exc)
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self.run_event_loop, daemon=True)
@@ -191,7 +195,7 @@ def _stream_chat_response(uid: int, result_queue: queue.Queue, model: str):
     """SSE streaming generator for chat completions (sync, runs in thread pool)."""
     try:
         while True:
-            token_id, finished = result_queue.get()
+            token_id, finished = result_queue.get(timeout=120)
             text = _frontend.tokenizer.decode(token_id)
 
             chunk = {
@@ -210,9 +214,11 @@ def _stream_chat_response(uid: int, result_queue: queue.Queue, model: str):
 
             if finished:
                 break
+    except Exception:
+        pass
     finally:
         _frontend.remove_result(uid)
-        yield "data: [DONE]\n\n"
+    yield "data: [DONE]\n\n"
 
 
 @app.post("/v1/completions")
@@ -264,7 +270,7 @@ def _stream_completion_response(uid: int, result_queue: queue.Queue, model: str)
     """SSE streaming generator for completions (sync, runs in thread pool)."""
     try:
         while True:
-            token_id, finished = result_queue.get()
+            token_id, finished = result_queue.get(timeout=120)
             text = _frontend.tokenizer.decode(token_id)
 
             chunk = {
@@ -283,9 +289,11 @@ def _stream_completion_response(uid: int, result_queue: queue.Queue, model: str)
 
             if finished:
                 break
+    except Exception:
+        pass
     finally:
         _frontend.remove_result(uid)
-        yield "data: [DONE]\n\n"
+    yield "data: [DONE]\n\n"
 
 
 @app.get("/health")

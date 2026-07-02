@@ -11,9 +11,10 @@
 - **Continuous Batching** — Prefill / Decode 两阶段分离调度，最大化吞吐
 - **PagedAttention** — 页式 KV Cache 管理，消除显存碎片
 - **RadixCache** — 基于 Radix Tree 的前缀感知缓存，自动复用公共前缀
-- **CUDA Graph** — Decode 阶段 kernel launch overhead 优化
-- **Tensor Parallelism** — Column / Row Parallel Linear + PyNCCL 多 GPU 扩展
-- **可插拔 Attention 后端** — FlashAttention (`fa`) / FlashInfer (`fi`) / 混合 (`fa,fi`)
+- **CUDA / NPU Graph** — Decode 阶段 kernel launch overhead 优化（支持 NVIDIA CUDA 和华为 Ascend NPU）
+- **Tensor Parallelism** — Column / Row Parallel Linear + NCCL/HCCL 多卡扩展
+- **多设备支持** — NVIDIA CUDA / 华为 Ascend NPU / CPU，自动检测优先级
+- **可插拔 Attention 后端** — FlashAttention (`fa`) / FlashInfer (`fi`) / PyTorch SDPA (`pt`)
 - **OpenAI 兼容 API** — `/v1/chat/completions` + `/v1/completions` + SSE 流式返回
 
 ## 架构概览
@@ -31,7 +32,7 @@ Scheduler ── PrefillManager + DecodeManager
 Engine (Model Forward + Sampling)
     │
     ▼
-KV Cache Pool + RadixCache + CUDA Graphs
+KV Cache Pool + RadixCache + CUDA/NPU Graphs
 ```
 
 ### 请求生命周期
@@ -59,14 +60,16 @@ minisgl/
 │   └── distributed/
 │       └── pynccl.py    # NCCL 通信原语封装
 ├── models/
-│   ├── opt.py           # OPT 模型（标准 Decoder）
-│   ├── qwen2.py         # Qwen2 模型（RMSNorm + Gated MLP）
+│   ├── decoder.py       # 共享基类：GatedMLP, RMSNormDecoderLayer, RMSNormForCausalLM
+│   ├── opt.py           # OPT 模型（LayerNorm + 可学习位置编码 + ReLU FFN）
+│   ├── qwen2.py         # Qwen2 模型（RMSNorm + Gated MLP + Q/K bias）
 │   ├── qwen3.py         # Qwen3 模型（+ QK LayerNorm + GQA）
 │   ├── qwen3_moe.py     # Qwen3-MoE 模型（MoE Router + FusedMoE）
 │   ├── llama.py         # Llama 模型（经典架构）
 │   ├── mistral.py       # Mistral 模型（+ Sliding Window Attention）
 │   ├── registry.py      # 模型注册与自动检测
 │   ├── layers/
+│   │   ├── attention.py # BaseAttention 模板方法
 │   │   ├── rms_norm.py  # RMSNorm（含 fused residual add）
 │   │   ├── rope.py      # Rotary Position Embedding
 │   │   ├── linear.py    # Column / Row Parallel Linear
@@ -87,17 +90,32 @@ minisgl/
 ├── server/
 │   └── frontend.py      # FastAPI 服务：SSE 流式 + OpenAI 兼容端点
 └── utils/
-    ├── device.py         # 设备管理 + 分布式初始化
+    ├── device.py         # 设备管理（CUDA/NPU/CPU）+ 分布式初始化（NCCL/HCCL）
     ├── logger.py         # 统一日志
     └── weights.py        # HuggingFace 权重加载 + TP 分片
 ```
+
+### 模型继承结构
+
+Qwen2 / Qwen3 / Llama / Mistral 共用 `decoder.py` 中的基类，消除重复代码：
+
+```
+RMSNormForCausalLM          ← Qwen2/Qwen3/Llama/Mistral/Qwen3MoE 继承
+  └── RMSNormModel          ← 共享 embed → layers → norm 流程
+        └── RMSNormDecoderLayer  ← 共享 LN → Attn → LN → MLP 流程
+              └── GatedMLP       ← SwiGLU 实现，所有模型共用
+```
+
+每个模型文件只需定义自己独特的 Attention 类（~50 行）。
 
 ## 快速开始
 
 ### 安装
 
 ```bash
-pip install torch transformers fastapi uvicorn
+pip install -e .
+# 或手动安装依赖
+pip install torch transformers fastapi uvicorn safetensors
 # 可选：高性能 attention 后端
 pip install flash-attn flashinfer
 ```
@@ -105,14 +123,17 @@ pip install flash-attn flashinfer
 ### 启动服务
 
 ```bash
-# 单 GPU
-python -m minisgl --model-path Qwen/Qwen2-0.5B-Instruct --port 8000
+# 单 GPU (CUDA)
+python -m minisgl --model-path Qwen/Qwen2.5-0.5B --port 8000
+
+# 华为 Ascend NPU
+python -m minisgl --model-path Qwen/Qwen3-0.6B --device npu --attention-backend pt
 
 # 多 GPU Tensor Parallel
-python -m minisgl --model-path Qwen/Qwen2-7B-Instruct --tp-size 4
+python -m minisgl --model-path Qwen/Qwen2.5-7B-Instruct --tp-size 4
 
 # 交互式 Shell
-python -m minisgl --model-path Qwen/Qwen2-0.5B-Instruct --shell
+python -m minisgl --model-path Qwen/Qwen3-0.6B --shell
 ```
 
 ### 命令行参数
@@ -122,21 +143,22 @@ python -m minisgl --model-path Qwen/Qwen2-0.5B-Instruct --shell
 | `--model-path` | (必填) | HuggingFace 模型路径 |
 | `--host` | `127.0.0.1` | API 监听地址 |
 | `--port` | `8000` | API 端口 |
-| `--tp-size` | `1` | Tensor Parallelism GPU 数量 |
+| `--tp-size` | `1` | Tensor Parallelism 卡数 |
+| `--device` | `auto` | 设备类型：`auto` / `cuda` / `npu` / `cpu` |
 | `--memory-ratio` | `0.9` | KV Cache 可用显存比例 |
 | `--max-running-req` | `256` | 最大并发请求数 |
 | `--max-seq-len` | `8192` | 最大序列长度 |
 | `--page-size` | `16` | KV Cache 页大小（tokens） |
-| `--attention-backend` | `fa` | 注意力后端：`fa` / `fi` / `fa,fi` |
+| `--attention-backend` | `fa` | 注意力后端：`fa` / `fi` / `fa,fi` / `pt` |
 | `--dtype` | `auto` | 模型精度：`auto` / `float16` / `bfloat16` |
 | `--shell` | `False` | 交互式 CLI 模式 |
 
 ### Python API
 
 ```python
-from minisgl import LLM
+from minisgl.engine.llm import LLM
 
-llm = LLM(model_path="Qwen/Qwen2-0.5B-Instruct")
+llm = LLM(model_path="Qwen/Qwen3-0.6B")
 
 # 单条生成
 output = llm.generate("Hello, who are you?", max_tokens=128)
@@ -155,34 +177,156 @@ response = llm.chat(messages, max_tokens=128)
 # Chat Completions
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen2","messages":[{"role":"user","content":"Hello"}],"stream":true}'
+  -d '{"messages":[{"role":"user","content":"Hello"}],"stream":true}'
 
 # Text Completions
 curl http://127.0.0.1:8000/v1/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen2","prompt":"Once upon a time","stream":false}'
+  -d '{"prompt":"Once upon a time","max_tokens":30,"stream":false}'
+
+# Health Check
+curl http://127.0.0.1:8000/health
 ```
+
+## 示例
+
+```
+examples/
+├── cpu_demo.py          # 零依赖 CPU 自包含 demo（无需下载模型）
+├── offline_inference.py # 综合离线推理：批量生成、LLM API、流式、采样策略
+├── benchmark.py         # 性能基准：prefill 延迟、decode 吞吐、端到端
+├── server_demo.py       # OpenAI 兼容 API 服务 + 自动化测试
+└── npu_inference.py     # 华为 Ascend NPU 推理 + 多模型测试
+```
+
+### CPU 自包含 Demo（无需下载模型）
+
+```bash
+python examples/cpu_demo.py
+```
+
+创建一个临时的随机权重小模型，验证完整的 Engine → Scheduler → Generate 管线。
+
+### 综合离线推理
+
+```bash
+python examples/offline_inference.py --model-path /path/to/model
+```
+
+涵盖：Engine+Scheduler 批量推理、LLM.generate()/chat() 高级 API、流式逐 token 生成（含 TTFT/吞吐指标）、采样策略对比（greedy/temperature/top-p/top-k）。
+
+### 性能基准测试
+
+```bash
+python examples/benchmark.py --model-path /path/to/model
+```
+
+### OpenAI 兼容 API 服务
+
+```bash
+python examples/server_demo.py --model-path /path/to/model
+```
+
+启动 FastAPI 服务器，自动测试 health check / sync completion / SSE streaming / chat。
+
+### NPU 推理
+
+```bash
+python examples/npu_inference.py --model-path /path/to/model --device npu
+python examples/npu_inference.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5-1.5B
+```
+
+## 华为 Ascend NPU 支持
+
+Mini-SGLang 完整支持华为昇腾 NPU 推理，通过 `torch_npu` 实现设备无关的张量计算。
+
+### 环境要求
+
+- CANN 9.0.0+
+- PyTorch 2.5+ 与匹配的 torch_npu 版本
+- 推荐使用 Docker 镜像：`torchtitan-npu:cann9.0.0-torch2.12.0`
+
+### NPU 快速启动
+
+```bash
+# 使用 Docker（推荐）
+docker run --privileged --shm-size=16g \
+  -e ASCEND_RT_VISIBLE_DEVICES=0 \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+  -v /path/to/models:/models \
+  torchtitan-npu:cann9.0.0-torch2.12.0 \
+  python -m minisgl --model-path /models/Qwen3-0.6B --device npu --attention-backend pt
+
+# NPU 单模型推理
+python examples/npu_inference.py --model-path /path/to/Qwen3-0.6B --device npu
+
+# NPU 多模型批量测试
+python examples/npu_inference.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5-1.5B Qwen3-1.7B
+```
+
+### NPU 适配要点
+
+| 项目 | 适配方案 |
+|------|---------|
+| 设备检测 | `torch.npu.is_available()` 自动检测，优先级 NPU > CUDA > CPU |
+| Attention | 使用 PyTorch SDPA（`--attention-backend pt`），torch_npu 提供硬件加速 |
+| Graph 加速 | `torch.npu.NPUGraph()` 替代 CUDA Graph（需 `TASK_QUEUE_ENABLE=1`） |
+| 分布式通信 | HCCL 后端自动选择（替代 NCCL） |
+| 内存管理 | `torch.npu.mem_get_info()` 统一显存查询 |
+| 索引操作 | 所有高级索引使用 `int64`（NPU 要求） |
+
+### NPU 性能测试结果
+
+**测试环境**: `torchtitan-npu:cann9.0.0-torch2.12.0` | Ascend 910 (64GB HBM) | torch 2.12.0 + torch_npu 2.12.0rc1
+
+| 模型 | 状态 | 加载时间 | Prefill | Decode | 批量(3x)吞吐 |
+|------|------|---------|---------|--------|-------------|
+| **Qwen2.5-0.5B** | PASS | 5.3s | 395.5 tok/s | 24.2 tok/s | 72.6 tok/s |
+| **Qwen2.5-1.5B** | PASS | 14.6s | 336.5 tok/s | 20.8 tok/s | 60.8 tok/s |
+| **Qwen2.5-3B** | PASS | 39.8s | 294.7 tok/s | 15.9 tok/s | 45.9 tok/s |
+| **Qwen3-0.6B** | PASS | 13.0s | 57.4 tok/s | 14.3 tok/s | 54.0 tok/s |
+| **Qwen3-1.7B** | PASS | 13.0s | 201.4 tok/s | 13.5 tok/s | 36.0 tok/s |
+| **Qwen3-4B** | PASS | 24.4s | 260.9 tok/s | 13.0 tok/s | 39.2 tok/s |
+
+> 6/6 模型全部通过，生成结果语义正确。Eager 模式推理稳定可靠。
+>
+> 测试命令：`python examples/npu_inference.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5-1.5B Qwen3-1.7B Qwen2.5-3B Qwen3-4B --max-tokens 30`
 
 ## 支持的模型
 
-| 模型 | 架构要点 |
-|------|---------|
-| **OPT** | LayerNorm + 可学习位置编码 + ReLU FFN |
-| **Qwen2** | RMSNorm + RoPE + Gated MLP (SwiGLU) |
-| **Qwen3** | Qwen2 + QK LayerNorm + GQA |
-| **Qwen3-MoE** | Qwen3 + MoE Router + FusedMoE |
-| **Llama** | 经典架构 + tie_word_embeddings |
-| **Mistral** | Llama + Sliding Window Attention |
+| 模型 | 架构要点 | CUDA 验证 | NPU 验证 |
+|------|---------|-----------|----------|
+| **OPT** | LayerNorm + 可学习位置编码 + ReLU FFN | OPT-125M | OPT-125M |
+| **Qwen2** | RMSNorm + RoPE + Gated MLP (SwiGLU) + Q/K bias | Qwen2.5-0.5B | Qwen2.5-{0.5B, 1.5B, 3B} |
+| **Qwen3** | Qwen2 + QK LayerNorm + GQA | Qwen3-0.6B | Qwen3-{0.6B, 1.7B, 4B} |
+| **Qwen3-MoE** | Qwen3 + MoE Router + FusedMoE | (单元测试) | (单元测试) |
+| **Llama** | 经典架构 + tie_word_embeddings | (单元测试) | (单元测试) |
+| **Mistral** | Llama + Sliding Window Attention | (单元测试) | (单元测试) |
 
 ## 运行测试
 
 ```bash
-# CPU 核心逻辑测试
-python3 tests/test_cpu_core.py
+# 单元测试（66 个测试，CPU 即可，~30s）
+python tests/test_cpu_core.py
 
-# E2E 演示（需要本地模型）
-python3 examples.py
+# 多模型集成测试（跨 OPT / Qwen2 / Qwen3 三种架构）
+python tests/test_examples.py
+
+# NPU 环境测试（需要 Docker + Ascend 硬件）
+docker run --privileged -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+  -v $(pwd):/workspace -w /workspace torchtitan-npu:cann9.0.0-torch2.12.0 \
+  python tests/test_cpu_core.py
 ```
+
+### 测试覆盖
+
+- **模型层**: RMSNorm, RoPE, Linear, Embedding, Attention Backend, 各模型 forward pass
+- **缓存**: KVCachePool alloc/free, RadixCache prefix/evict/remove, NaiveCacheManager LRU
+- **调度**: PrefillManager, DecodeManager, BatchContext, Req 生命周期
+- **采样**: Greedy, Top-K, Top-P, Temperature, 边界情况
+- **设备**: NPU 检测, 设备切换, 内存查询, 分布式后端选择
+- **集成**: 端到端调度循环, 多请求并发, EOS 终止, OpenAI API 端点, SSE 流式
+- **前端**: FrontendManager 请求提交/获取/清理
 
 ## 参考项目
 
@@ -190,4 +334,4 @@ python3 examples.py
 - [vLLM](https://github.com/vllm-project/vllm) — PagedAttention 参考
 - [FlashInfer](https://github.com/flashinfer-ai/flashinfer) — Attention kernel
 - [FlashAttention](https://github.com/Dao-AILab/flash-attention) — Attention kernel
-- [mini-vllm](https://github.com/jianzhnie/mini-vllm) — 姊妹教学项目
+- [torch_npu](https://gitee.com/ascend/pytorch) — 华为 Ascend NPU PyTorch 后端

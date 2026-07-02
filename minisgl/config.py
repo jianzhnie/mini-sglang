@@ -32,12 +32,17 @@ class ServerArgs:
     cuda_graph_bs: int | None = None
     attention_backend: str = "fa"
     dtype: str = "auto"
+    device: str = "auto"
     trust_remote_code: bool = False
     shell: bool = False
 
     def __post_init__(self) -> None:
         if self.cuda_graph_bs is None:
             self.cuda_graph_bs = self.max_running_req
+        if self.device != "auto":
+            from minisgl.utils.device import set_device
+            import torch
+            set_device(torch.device(self.device))
 
 
 @dataclass

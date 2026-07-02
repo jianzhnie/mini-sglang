@@ -39,14 +39,16 @@ class BatchContext:
         seq_lengths = []
 
         for req in reqs:
-            uncached_tokens = req.input_ids[req.cached_len :]
+            uncached_tokens = req.input_ids[req.cached_len:]
             all_input_ids.extend(uncached_tokens)
-            all_positions.extend(range(req.cached_len, len(req.input_ids)))
+            start_pos = req.cached_len
+            end_pos = len(req.input_ids)
+            all_positions.extend(range(start_pos, end_pos))
             seq_lengths.append(len(uncached_tokens))
 
             if req.cache_handle:
                 pages = req.cache_handle.page_ids
-                for pos in range(req.cached_len, len(req.input_ids)):
+                for pos in range(start_pos, end_pos):
                     page_idx = pos // self.page_size
                     if page_idx < len(pages):
                         loc = pages[page_idx] * self.page_size + (pos % self.page_size)
@@ -74,22 +76,11 @@ class BatchContext:
                 device=self.device,
             )
 
-        # Build cu_seqlens for FlashAttention varlen
-        if len(seq_lengths) > 1:
-            cu = torch.tensor(
-                [0] + torch.tensor(seq_lengths).cumsum(0).tolist(),
-                dtype=torch.int32,
-                device=self.device,
-            )
-            batch.cu_seqlens_q = cu
-        else:
-            batch.cu_seqlens_q = torch.tensor(
-                [0, seq_lengths[0]] if seq_lengths else [0],
-                dtype=torch.int32,
-                device=self.device,
-            )
+        seq_lens_t = torch.tensor(seq_lengths, dtype=torch.int32)
+        cu = torch.zeros(len(seq_lengths) + 1, dtype=torch.int32)
+        cu[1:] = seq_lens_t.cumsum(0)
+        batch.cu_seqlens_q = cu.to(device=self.device)
 
-        # Build req_to_token (page table): (num_reqs, max_seq_len)
         num_reqs = len(reqs)
         table = torch.full(
             (num_reqs, self.max_seq_len),

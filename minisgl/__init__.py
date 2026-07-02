@@ -52,14 +52,21 @@ def parse_args() -> ServerArgs:
         "--cuda-graph-bs",
         type=int,
         default=None,
-        help="Max batch size for CUDA graph capture",
+        help="Max batch size for graph capture (CUDA/NPU)",
     )
     parser.add_argument(
         "--attention-backend",
         type=str,
         default="fa",
-        choices=["fa", "fi", "fa,fi"],
-        help="Attention backend: fa (FlashAttention), fi (FlashInfer)",
+        choices=["fa", "fi", "fa,fi", "pt"],
+        help="Attention backend: fa (FlashAttention), fi (FlashInfer), pt (PyTorch)",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cuda", "npu", "cpu"],
+        help="Device type (auto detects NPU > CUDA > CPU)",
     )
     parser.add_argument(
         "--dtype",
@@ -78,7 +85,12 @@ def parse_args() -> ServerArgs:
         help="Interactive CLI shell mode",
     )
     parser.add_argument("--log-level", type=str, default="INFO")
-    return ServerArgs(**vars(parser.parse_args()))
+    parsed = parser.parse_args()
+    log_level = parsed.log_level
+    delattr(parsed, "log_level")
+    args = ServerArgs(**vars(parsed))
+    args._log_level = log_level
+    return args
 
 
 def run_server(args: ServerArgs) -> None:
@@ -87,7 +99,8 @@ def run_server(args: ServerArgs) -> None:
 
     from minisgl.server.frontend import app, init_frontend
 
-    setup_logger(level=getattr(__import__("logging"), args.log_level))
+    log_level = getattr(args, "_log_level", "INFO")
+    setup_logger(level=getattr(__import__("logging"), log_level))
 
     model_args = ModelArgs.from_pretrained(args.model_path)
     tokenizer = TokenizerWorker(args.model_path)
@@ -97,7 +110,7 @@ def run_server(args: ServerArgs) -> None:
 
     init_frontend(args, scheduler, tokenizer)
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level.lower())
+    uvicorn.run(app, host=args.host, port=args.port, log_level=log_level.lower())
 
 
 def run_shell(args: ServerArgs) -> None:

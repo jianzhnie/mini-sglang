@@ -65,38 +65,34 @@ class AttentionBackend:
         write_loc: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        """Compute attention output. Routes to the configured backend."""
+        """Compute attention output. Routes to the configured backend.
+
+        Backend selection:
+        - "fi": FlashInfer (if available)
+        - "fa": FlashAttention (if available), else PyTorch fallback
+        - "pt": Always use PyTorch SDPA (works on CUDA, NPU, CPU)
+
+        On NPU devices, PyTorch backend is used automatically since
+        flash_attn is not available. torch_npu provides SDPA acceleration.
+        """
         backend = cls._backend_name
+
+        if backend == "pt":
+            return PyTorchBackend.forward(
+                q, k, v, k_cache, v_cache, write_loc, **kwargs
+            )
 
         if "fi" in backend and _FLASHINFER_AVAILABLE:
             return FlashInferBackend.forward(
-                q,
-                k,
-                v,
-                k_cache,
-                v_cache,
-                write_loc,
-                **kwargs,
+                q, k, v, k_cache, v_cache, write_loc, **kwargs
             )
         elif _FLASH_ATTN_AVAILABLE:
             return FlashAttentionBackend.forward(
-                q,
-                k,
-                v,
-                k_cache,
-                v_cache,
-                write_loc,
-                **kwargs,
+                q, k, v, k_cache, v_cache, write_loc, **kwargs
             )
         else:
             return PyTorchBackend.forward(
-                q,
-                k,
-                v,
-                k_cache,
-                v_cache,
-                write_loc,
-                **kwargs,
+                q, k, v, k_cache, v_cache, write_loc, **kwargs
             )
 
 
@@ -228,6 +224,12 @@ class PyTorchBackend:
                 q, num_heads, head_dim, k_cache, v_cache, scale, **kwargs
             )
 
+        cu_seqlens_q = kwargs.get("cu_seqlens_q")
+        if cu_seqlens_q is not None and len(cu_seqlens_q) > 2:
+            return PyTorchBackend._prefill_varlen(
+                q, k, v, cu_seqlens_q, scale
+            )
+
         return F.scaled_dot_product_attention(
             q,
             k,
@@ -237,6 +239,34 @@ class PyTorchBackend:
             is_causal=True,
             scale=scale,
         )
+
+    @staticmethod
+    def _prefill_varlen(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        scale: float,
+    ) -> torch.Tensor:
+        """Handle multi-sequence prefill by processing each sequence separately."""
+        batch, num_heads, total_len, head_dim = q.shape
+        outputs = torch.zeros_like(q)
+        num_seqs = len(cu_seqlens) - 1
+        for i in range(num_seqs):
+            start = int(cu_seqlens[i].item())
+            end = int(cu_seqlens[i + 1].item())
+            qi = q[:, :, start:end, :]
+            ki = k[:, :, start:end, :]
+            vi = v[:, :, start:end, :]
+            out_i = F.scaled_dot_product_attention(
+                qi, ki, vi,
+                attn_mask=None,
+                dropout_p=0.0,
+                is_causal=True,
+                scale=scale,
+            )
+            outputs[:, :, start:end, :] = out_i
+        return outputs
 
     @staticmethod
     def _decode_with_cache(
@@ -275,21 +305,28 @@ class PyTorchBackend:
         max_len = int(cache_seqlens.max().item()) + 1
         idxs = req_to_token[:, :max_len]
         valid_mask = idxs >= 0
-        idxs_safe = idxs.clamp(min=0)
+        idxs_safe = idxs.clamp(min=0).long()
 
         gathered_k = flat_k[idxs_safe]
         gathered_v = flat_v[idxs_safe]
-        gathered_k = gathered_k * valid_mask[:, :, None, None]
-        gathered_v = gathered_v * valid_mask[:, :, None, None]
 
         gathered_k = gathered_k.transpose(1, 2)
         gathered_v = gathered_v.transpose(1, 2)
+
+        num_reqs = q.shape[0]
+        attn_mask = valid_mask.unsqueeze(1).unsqueeze(2).expand(
+            num_reqs, num_heads, 1, max_len
+        )
+        attn_bias = torch.zeros(
+            num_reqs, num_heads, 1, max_len, dtype=q.dtype, device=q.device
+        )
+        attn_bias.masked_fill_(~attn_mask, float("-inf"))
 
         output = F.scaled_dot_product_attention(
             q,
             gathered_k,
             gathered_v,
-            attn_mask=None,
+            attn_mask=attn_bias,
             dropout_p=0.0,
             is_causal=False,
             scale=scale,
