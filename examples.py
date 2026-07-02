@@ -14,9 +14,8 @@ from minisgl.config import ModelArgs, SamplingParams, ServerArgs
 from minisgl.engine.engine import Engine
 from minisgl.scheduler.scheduler import Scheduler
 
-# MODEL_PATH = os.path.expanduser("~/hfhub/models/facebook/opt-125m")
+MODEL_PATH = os.path.expanduser("~/hfhub/models/facebook/opt-125m")
 MODEL_PATH = os.path.expanduser("~/hfhub/models/Qwen/Qwen3-0.6B")
-
 
 
 def run_demo() -> None:
