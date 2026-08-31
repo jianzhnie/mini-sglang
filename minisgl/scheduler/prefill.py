@@ -62,10 +62,12 @@ class PrefillManager:
                     break
 
                 # Try prefix matching (may reduce pages needed via cache sharing)
-                matched_len = self.radix_cache.match_prefix(req.input_ids)
-                req.cached_len = max(req.cached_len, matched_len)
+                matched_len, shared_pages = self.radix_cache.match_prefix(
+                    req.input_ids
+                )
+                req.cached_len = matched_len
 
-                new_pages = self._pages_needed(req)
+                new_pages = self._pages_needed(req, matched_len)
 
                 if new_pages > self.pool.num_pages:
                     # A single request larger than the whole pool can never be
@@ -87,12 +89,17 @@ class PrefillManager:
                     if self.pool.free_count() < new_pages:
                         break
 
-                # Allocate KV cache pages
+                # Allocate pages for the uncached suffix only; the full page
+                # table is shared prefix pages followed by the new pages.
                 handle = self.pool.alloc(new_pages)
+                handle.page_ids = list(shared_pages) + handle.page_ids
+                handle.num_shared = len(shared_pages)
+                handle.cached_len = matched_len
                 req.cache_handle = handle
                 req.table_idx = len(scheduled)
 
-                # Insert into radix cache
+                # Insert into radix cache (teaching simplification: the KV is
+                # attached to the tree before it is actually computed).
                 self.radix_cache.insert(req.input_ids, handle)
 
                 self.pending.popleft()
@@ -106,12 +113,13 @@ class PrefillManager:
             self.running.extend(scheduled)
             return Batch(reqs=scheduled, phase="prefill")
 
-    def _pages_needed(self, req: Req) -> int:
-        total = min(
+    def _pages_needed(self, req: Req, matched_len: int) -> int:
+        """Pages to allocate for the uncached suffix [matched_len, upper)."""
+        upper = min(
             len(req.input_ids) + req.sampling_params.max_tokens,
             self.max_seq_len,
         )
-        return (total + self.page_size - 1) // self.page_size
+        return (upper - matched_len + self.page_size - 1) // self.page_size
 
     def remove_finished(self, req: Req) -> None:
         with self._lock:
@@ -121,8 +129,9 @@ class PrefillManager:
         with contextlib.suppress(ValueError):
             self.running.remove(req)
         if req.cache_handle:
-            self.radix_cache.remove(req.input_ids)
-            self.pool.free(req.cache_handle)
+            # Pages are owned by the cache manager (the radix tree); they are
+            # reclaimed by evict() under memory pressure, not here.
+            self.radix_cache.remove(req.input_ids, req.cache_handle)
             req.cache_handle = None
 
     def remove_finished_batch(self, reqs: list[Req]) -> None:

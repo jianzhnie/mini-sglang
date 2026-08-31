@@ -163,6 +163,29 @@ class TestKVCachePool(unittest.TestCase):
         pool.free(h2)
         self.assertEqual(pool.free_count(), 100)
 
+    def test_free_idempotent_and_free_pages_by_id(self):
+        from minisgl.engine.kvcache.pool import KVCachePool
+
+        pool = KVCachePool(
+            num_layers=2,
+            num_pages=10,
+            page_size=4,
+            num_kv_heads=4,
+            head_dim=32,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+        h = pool.alloc(3)
+        self.assertEqual(pool.free_count(), 7)
+        pool.free(h)
+        self.assertEqual(pool.free_count(), 10)
+        pool.free(h)  # second free must be a no-op
+        self.assertEqual(pool.free_count(), 10)
+
+        h2 = pool.alloc(2)
+        pool.free_pages_by_id(list(h2.page_ids))
+        self.assertEqual(pool.free_count(), 10)
+
     def test_get_kv_cache(self):
         from minisgl.engine.kvcache.pool import KVCachePool
 
@@ -206,16 +229,44 @@ class TestRadixCache(unittest.TestCase):
         radix.insert(tokens, handle)
 
         # Match full prefix
-        matched = radix.match_prefix([1, 2, 3, 4, 9, 0])
+        matched, shared = radix.match_prefix([1, 2, 3, 4, 9, 0])
         self.assertEqual(matched, 4)  # Pages are size 4
+        self.assertEqual(shared, [handle.page_ids[0]])
 
         # Match partial
-        matched = radix.match_prefix([1, 2, 5, 6])
+        matched, shared = radix.match_prefix([1, 2, 5, 6])
         self.assertEqual(matched, 0)  # Diverges at token 3
+        self.assertEqual(shared, [])
 
         # No match
-        matched = radix.match_prefix([99, 99])
+        matched, shared = radix.match_prefix([99, 99])
         self.assertEqual(matched, 0)
+        self.assertEqual(shared, [])
+
+    def test_match_prefix_keeps_last_token_uncached(self):
+        from minisgl.engine.kvcache.pool import KVCachePool
+        from minisgl.engine.kvcache.radix import RadixCacheManager
+
+        pool = KVCachePool(
+            num_layers=2,
+            num_pages=100,
+            page_size=4,
+            num_kv_heads=4,
+            head_dim=32,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+        radix = RadixCacheManager(pool, page_size=4)
+
+        tokens = [1, 2, 3, 4, 5, 6, 7, 8]
+        handle = pool.alloc(2)
+        radix.insert(tokens, handle)
+
+        # Exact same sequence: the last token must be re-forwarded so that
+        # sampling has logits, so matched_len is clamped to len - 1 (aligned).
+        matched, shared = radix.match_prefix([1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertEqual(matched, 4)
+        self.assertEqual(shared, [handle.page_ids[0]])
 
 
 # ── Test Scheduler Batch Logic ──
@@ -524,6 +575,9 @@ class TestModelDummy(unittest.TestCase):
         input_ids = torch.randint(0, 1000, (1, 1))
         positions = torch.tensor([8])
         write_loc = torch.tensor([8], dtype=torch.int32)
+        # Paged KV metadata: tokens 0..8 live in flat slots 0..8
+        req_to_token = torch.arange(9, dtype=torch.int32).unsqueeze(0)
+        cache_seqlens = torch.tensor([8], dtype=torch.int32)
 
         with torch.inference_mode():
             logits = model(
@@ -532,6 +586,9 @@ class TestModelDummy(unittest.TestCase):
                 k_cache=k_all,
                 v_cache=v_all,
                 write_loc=write_loc,
+                req_to_token=req_to_token,
+                cache_seqlens=cache_seqlens,
+                forward_mode="decode",
             )
         self.assertEqual(logits.shape, (1, 1, 1000))
 
@@ -637,46 +694,34 @@ class TestNaiveCacheManager(unittest.TestCase):
             device=torch.device("cpu"),
         )
 
-    def test_allocate_and_free(self):
+    def test_remove_frees_pages(self):
         from minisgl.engine.kvcache.naive import NaiveCacheManager
 
         pool = self._make_pool(50)
         mgr = NaiveCacheManager(pool, page_size=4)
-        handle = mgr.allocate(uid=1, num_pages=5)
-        self.assertEqual(handle.num_pages(), 5)
+        handle = pool.alloc(5)
+        mgr.insert([1, 2, 3], handle)  # no-op: nothing tracked
         self.assertEqual(pool.free_count(), 45)
-        mgr.free(1)
+        mgr.remove([1, 2, 3], handle)
         self.assertEqual(pool.free_count(), 50)
 
-    def test_eviction_on_pressure(self):
+    def test_evict_is_noop(self):
         from minisgl.engine.kvcache.naive import NaiveCacheManager
 
         pool = self._make_pool(10)
         mgr = NaiveCacheManager(pool, page_size=4)
-        mgr.allocate(uid=1, num_pages=6)
-        mgr.allocate(uid=2, num_pages=4)
-        self.assertEqual(pool.free_count(), 0)
-        handle3 = mgr.allocate(uid=3, num_pages=3)
-        self.assertIsNotNone(handle3)
-        self.assertEqual(handle3.num_pages(), 3)
-
-    def test_touch_moves_to_end(self):
-        from minisgl.engine.kvcache.naive import NaiveCacheManager
-
-        pool = self._make_pool(10)
-        mgr = NaiveCacheManager(pool, page_size=4)
-        mgr.allocate(uid=1, num_pages=3)
-        mgr.allocate(uid=2, num_pages=3)
-        mgr.touch(1)
-        lru_keys = list(mgr.lru.keys())
-        self.assertEqual(lru_keys[-1], 1)
+        handle = pool.alloc(6)
+        mgr.insert([1, 2, 3], handle)
+        # Naive keeps no cached pages, so eviction reclaims nothing.
+        self.assertEqual(mgr.evict(4), [])
+        self.assertEqual(pool.free_count(), 4)
 
     def test_match_prefix_always_zero(self):
         from minisgl.engine.kvcache.naive import NaiveCacheManager
 
         pool = self._make_pool(10)
         mgr = NaiveCacheManager(pool, page_size=4)
-        self.assertEqual(mgr.match_prefix([1, 2, 3]), 0)
+        self.assertEqual(mgr.match_prefix([1, 2, 3]), (0, []))
 
 
 # ── Test Radix Cache Evict/Remove ──
@@ -704,17 +749,51 @@ class TestRadixCacheEvictRemove(unittest.TestCase):
         radix.insert(tokens, handle)
         node = radix.root.children[1]
         self.assertEqual(node.ref_count, 1)
-        radix.remove(tokens)
+        radix.remove(tokens, handle)
         self.assertEqual(node.ref_count, 0)
+        # remove() must not free pages; they are owned by the tree.
+        self.assertEqual(pool.free_count(), 49)
 
     def test_evict_after_remove(self):
         pool, radix = self._make_pool_and_radix(20)
         tokens = [1, 2, 3, 4, 5, 6, 7, 8]
         handle = pool.alloc(2)
         radix.insert(tokens, handle)
-        radix.remove(tokens)
+        radix.remove(tokens, handle)
         evicted = radix.evict(2)
-        self.assertGreater(len(evicted), 0)
+        self.assertEqual(sorted(evicted), sorted(handle.page_ids))
+        self.assertEqual(pool.free_count(), 20)
+        # The sequence is fully detached: no stale prefix match afterwards.
+        self.assertEqual(radix.match_prefix(tokens), (0, []))
+
+    def test_evict_partial_tail_page(self):
+        # 6 tokens with page_size 4: one full page + one partial tail page.
+        pool, radix = self._make_pool_and_radix(20)
+        tokens = [1, 2, 3, 4, 5, 6]
+        handle = pool.alloc(2)
+        radix.insert(tokens, handle)
+        radix.remove(tokens, handle)
+        evicted = radix.evict(2)
+        self.assertEqual(sorted(evicted), sorted(handle.page_ids))
+        self.assertEqual(pool.free_count(), 20)
+
+    def test_evict_shared_prefix_only_frees_once(self):
+        # Two sequences sharing page 0; evicting everything frees each page once.
+        pool, radix = self._make_pool_and_radix(20)
+        h1 = pool.alloc(2)
+        radix.insert([1, 2, 3, 4, 5, 6], h1)
+        matched, shared = radix.match_prefix([1, 2, 3, 4, 7, 8])
+        self.assertEqual(matched, 4)
+        h2 = pool.alloc(1)
+        h2.page_ids = shared + h2.page_ids
+        h2.num_shared = len(shared)
+        radix.insert([1, 2, 3, 4, 7, 8], h2)
+        radix.remove([1, 2, 3, 4, 5, 6], h1)
+        radix.remove([1, 2, 3, 4, 7, 8], h2)
+        evicted = radix.evict(10)
+        # Pages: h1[0] (shared page 0), h1[1], h2[1] — each exactly once.
+        self.assertEqual(sorted(evicted), sorted({h1.page_ids[0], h1.page_ids[1], h2.page_ids[1]}))
+        self.assertEqual(pool.free_count(), 20)
 
     def test_evict_respects_refcount(self):
         pool, radix = self._make_pool_and_radix(20)
@@ -1054,6 +1133,49 @@ class TestPyTorchBackendDecode(unittest.TestCase):
         out = PyTorchBackend.forward(q, k, v, cu_seqlens_q=cu_seqlens)
         self.assertEqual(out.shape, (1, 4, 8, 32))
         self.assertFalse(torch.isnan(out).any())
+
+    def test_prefill_extend_matches_full_prefill(self):
+        # Extend attention (cached prefix + uncached suffix) must match a full
+        # causal prefill over the whole sequence.
+        import torch.nn.functional as F
+
+        from minisgl.models.attention.backend import PyTorchBackend
+
+        torch.manual_seed(0)
+        num_heads, head_dim, page_size = 4, 32, 4
+        total, cached = 6, 4
+        suffix = total - cached
+
+        k_cache = torch.zeros(2, page_size, num_heads, head_dim)
+        v_cache = torch.zeros(2, page_size, num_heads, head_dim)
+        q_full = torch.randn(1, num_heads, total, head_dim)
+        k_full = torch.randn(1, num_heads, total, head_dim)
+        v_full = torch.randn(1, num_heads, total, head_dim)
+        # KV cache flat layout: page_id * page_size + offset
+        k_cache.view(-1, num_heads, head_dim)[:total] = k_full[0].transpose(0, 1)
+        v_cache.view(-1, num_heads, head_dim)[:total] = v_full[0].transpose(0, 1)
+
+        req_to_token = torch.full((1, 8), -1, dtype=torch.int32)
+        req_to_token[0, :total] = torch.arange(total, dtype=torch.int32)
+        prefix_lens = torch.tensor([cached], dtype=torch.int32)
+        cu_seqlens = torch.tensor([0, suffix], dtype=torch.int32)
+
+        out = PyTorchBackend.forward(
+            q_full[:, :, cached:, :],
+            k_full[:, :, cached:, :],
+            v_full[:, :, cached:, :],
+            k_cache=k_cache,
+            v_cache=v_cache,
+            cu_seqlens_q=cu_seqlens,
+            prefix_lens=prefix_lens,
+            req_to_token=req_to_token,
+            forward_mode="prefill",
+        )
+        ref = F.scaled_dot_product_attention(
+            q_full, k_full, v_full, is_causal=True
+        )[:, :, cached:, :]
+        self.assertEqual(out.shape, ref.shape)
+        self.assertTrue(torch.allclose(out, ref, atol=1e-5))
 
 
 # ── Test EOS Normalization ──

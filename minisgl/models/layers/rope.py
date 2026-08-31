@@ -46,6 +46,18 @@ class RotaryEmbedding:
         if self._cos_table is None or seq_len > self._cos_table.shape[2]:
             self._build_cache(max(seq_len, self.max_position_embeddings))
 
+    def prebuild(self, seq_len: int, device: torch.device) -> None:
+        """Build cos/sin tables up to seq_len and move them to device.
+
+        Idempotent: safe to call multiple times (e.g. once per layer when
+        layers hold separate RotaryEmbedding instances). Called by the Engine
+        at init so __call__ never needs to grow tables or cross devices.
+        """
+        self._ensure_cache(seq_len)
+        if self._cos_table.device != device:
+            self._cos_table = self._cos_table.to(device)
+            self._sin_table = self._sin_table.to(device)
+
     def __call__(
         self,
         q: torch.Tensor,
@@ -57,13 +69,23 @@ class RotaryEmbedding:
         Args:
             q: query tensor (batch, num_heads, seq_len, head_dim)
             k: key tensor (batch, num_kv_heads, seq_len, head_dim)
-            positions: position indices (seq_len,)
+            positions: position indices (seq_len,), on q's device
         """
-        self._ensure_cache(positions.max().item() + 1)
+        # Tables live on the compute device (one-time move here as a fallback
+        # for non-Engine callers; Engine calls prebuild() at init). Combined
+        # with on-device indexing below, this eliminates the per-layer,
+        # per-step host-device syncs (positions.max().item() + .cpu()) that
+        # used to run here — two syncs per layer per forward step — and keeps
+        # the op CUDA-graph capturable.
+        if self._cos_table.device != q.device:
+            self._cos_table = self._cos_table.to(q.device)
+            self._sin_table = self._sin_table.to(q.device)
 
-        pos_cpu = positions.cpu().long()
-        cos = self._cos_table[:, :, pos_cpu, :].to(device=q.device, dtype=q.dtype)
-        sin = self._sin_table[:, :, pos_cpu, :].to(device=q.device, dtype=q.dtype)
+        # Index directly with on-device positions. Out-of-range positions
+        # fail loudly via torch's index error rather than being clamped.
+        pos = positions.long()
+        cos = self._cos_table[:, :, pos, :].to(dtype=q.dtype)
+        sin = self._sin_table[:, :, pos, :].to(dtype=q.dtype)
 
         if cos.dim() == 4 and cos.shape[2] > 1 and q.shape[2] == 1:
             cos = cos.permute(2, 0, 1, 3)

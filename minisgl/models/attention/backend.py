@@ -115,8 +115,17 @@ class FlashAttentionBackend:
 
         batch, num_heads, seq_len, head_dim = q.shape
 
+        forward_mode = kwargs.get("forward_mode")
+        if forward_mode is None:
+            # Legacy callers (e.g. CUDA graph capture) don't pass a mode.
+            forward_mode = (
+                "decode"
+                if (seq_len == 1 and k_cache is not None and v_cache is not None)
+                else "prefill"
+            )
+
         # Decode: use paged KV cache
-        if seq_len == 1 and k_cache is not None and v_cache is not None:
+        if forward_mode == "decode":
             cache_seqlens = kwargs.get("cache_seqlens")
             block_table = kwargs.get("block_table")
             return flash_attn_with_kvcache(
@@ -129,7 +138,7 @@ class FlashAttentionBackend:
                 causal=True,
             ).transpose(1, 2)
 
-        # Prefill: flash attention with varlen
+        # Prefill
         q_flat = q.transpose(1, 2).reshape(-1, num_heads, head_dim)
         k_flat = k.transpose(1, 2).reshape(-1, num_heads, head_dim)
         v_flat = v.transpose(1, 2).reshape(-1, num_heads, head_dim)
@@ -142,6 +151,20 @@ class FlashAttentionBackend:
             cu_seqlens_q = torch.tensor(
                 [0, total_tokens], dtype=torch.int32, device=q.device
             )
+
+        # Extend attention: requests with a cached prefix read the prefix KV
+        # from the paged cache instead of the (suffix-only) k/v tensors.
+        prefix_lens = kwargs.get("prefix_lens")
+        block_table = kwargs.get("block_table")
+        if (
+            prefix_lens is not None
+            and block_table is not None
+            and k_cache is not None
+            and int(prefix_lens.max()) > 0
+        ):
+            return FlashAttentionBackend._prefill_extend(
+                q_flat, k_cache, v_cache, cu_seqlens_q, prefix_lens, block_table
+            ).view(batch, seq_len, num_heads, head_dim).transpose(1, 2)
 
         max_seqlen = (
             int((cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max().item())
@@ -161,6 +184,41 @@ class FlashAttentionBackend:
             causal=True,
         )
         return out.view(batch, seq_len, num_heads, head_dim).transpose(1, 2)
+
+    @staticmethod
+    def _prefill_extend(
+        q_flat: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        prefix_lens: torch.Tensor,
+        block_table: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-request extend attention against the paged KV cache.
+
+        flash_attn_with_kvcache aligns the causal mask to the bottom-right,
+        so a suffix query at relative position p attends to the first
+        cached_len + p + 1 cached KV entries — exactly extend semantics.
+        """
+        head_dim = q_flat.shape[2]
+        out_flat = torch.empty_like(q_flat)
+        for i in range(len(prefix_lens)):
+            start = int(cu_seqlens[i].item())
+            end = int(cu_seqlens[i + 1].item())
+            total = int(prefix_lens[i].item()) + (end - start)
+            out_i = flash_attn_with_kvcache(
+                q_flat[start:end].unsqueeze(0),
+                k_cache,
+                v_cache,
+                block_table=block_table[i : i + 1],
+                cache_seqlens=torch.tensor(
+                    [total], dtype=torch.int32, device=q_flat.device
+                ),
+                softmax_scale=1.0 / math.sqrt(head_dim),
+                causal=True,
+            )
+            out_flat[start:end] = out_i[0]
+        return out_flat
 
 
 class FlashInferBackend:
@@ -197,8 +255,8 @@ class FlashInferBackend:
 class PyTorchBackend:
     """Standard PyTorch scaled dot-product attention (fallback).
 
-    During decode, gathers cached K,V from the paged KV cache to provide
-    full context for each request.
+    During decode and extend-prefill, gathers cached K,V from the paged KV
+    cache to provide full context for each request.
     """
 
     @staticmethod
@@ -219,12 +277,37 @@ class PyTorchBackend:
             k = k.repeat_interleave(num_heads // num_kv_heads, dim=1)
             v = v.repeat_interleave(num_heads // num_kv_heads, dim=1)
 
-        if seq_len == 1 and k_cache is not None and v_cache is not None:
+        forward_mode = kwargs.get("forward_mode")
+        if forward_mode is None:
+            # Legacy callers (e.g. CUDA graph capture) don't pass a mode.
+            forward_mode = (
+                "decode"
+                if (seq_len == 1 and k_cache is not None and v_cache is not None)
+                else "prefill"
+            )
+
+        if forward_mode == "decode":
             return PyTorchBackend._decode_with_cache(
                 q, num_heads, head_dim, k_cache, v_cache, scale, **kwargs
             )
 
+        # Prefill. Requests with a cached prefix use extend attention: the
+        # prefix KV is read back from the paged cache (the suffix KV was
+        # already written there by _write_kv_cache before this call).
+        prefix_lens = kwargs.get("prefix_lens")
+        req_to_token = kwargs.get("req_to_token")
         cu_seqlens_q = kwargs.get("cu_seqlens_q")
+        if (
+            prefix_lens is not None
+            and req_to_token is not None
+            and k_cache is not None
+            and len(prefix_lens) > 0
+            and int(prefix_lens.max()) > 0
+        ):
+            return PyTorchBackend._prefill_extend(
+                q, k_cache, v_cache, cu_seqlens_q, prefix_lens, req_to_token, scale
+            )
+
         if cu_seqlens_q is not None and len(cu_seqlens_q) > 2:
             return PyTorchBackend._prefill_varlen(q, k, v, cu_seqlens_q, scale)
 
@@ -237,6 +320,61 @@ class PyTorchBackend:
             is_causal=True,
             scale=scale,
         )
+
+    @staticmethod
+    def _prefill_extend(
+        q: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        prefix_lens: torch.Tensor,
+        req_to_token: torch.Tensor,
+        scale: float,
+    ) -> torch.Tensor:
+        """Extend attention: suffix queries attend to cached prefix + suffix KV.
+
+        For request i with cached prefix length c and u uncached tokens, all
+        c+u KV entries are gathered via req_to_token, and the query at
+        relative position p attends to keys [0, c + p] (causal with offset).
+        """
+        _, num_heads, _, head_dim = q.shape
+        num_kv_heads = k_cache.shape[2]
+        flat_k = k_cache.reshape(-1, num_kv_heads, head_dim)
+        flat_v = v_cache.reshape(-1, num_kv_heads, head_dim)
+
+        outputs = torch.zeros_like(q)
+        for i in range(len(prefix_lens)):
+            start = int(cu_seqlens[i].item())
+            end = int(cu_seqlens[i + 1].item())
+            cached = int(prefix_lens[i].item())
+            u = end - start
+            total = cached + u
+
+            idxs = req_to_token[i, :total].long()
+            k_i = flat_k[idxs].transpose(0, 1)  # (num_kv_heads, total, head_dim)
+            v_i = flat_v[idxs].transpose(0, 1)
+            if num_heads != num_kv_heads:
+                k_i = k_i.repeat_interleave(num_heads // num_kv_heads, dim=0)
+                v_i = v_i.repeat_interleave(num_heads // num_kv_heads, dim=0)
+
+            q_i = q[0, :, start:end, :]  # (num_heads, u, head_dim)
+            q_pos = torch.arange(u, device=q.device) + cached
+            k_pos = torch.arange(total, device=q.device)
+            allow = k_pos.unsqueeze(0) <= q_pos.unsqueeze(1)
+            attn_bias = torch.zeros(u, total, dtype=q.dtype, device=q.device)
+            attn_bias.masked_fill_(~allow, float("-inf"))
+
+            out_i = F.scaled_dot_product_attention(
+                q_i.unsqueeze(0),
+                k_i.unsqueeze(0),
+                v_i.unsqueeze(0),
+                attn_mask=attn_bias.unsqueeze(0).unsqueeze(0),
+                dropout_p=0.0,
+                is_causal=False,
+                scale=scale,
+            )
+            outputs[0, :, start:end, :] = out_i[0]
+        return outputs
 
     @staticmethod
     def _prefill_varlen(
@@ -283,15 +421,11 @@ class PyTorchBackend:
         cache_seqlens = kwargs.get("cache_seqlens")
 
         if req_to_token is None or cache_seqlens is None:
-            return F.scaled_dot_product_attention(
-                q,
-                q,
-                q,
-                attn_mask=None,
-                dropout_p=0.0,
-                is_causal=True,
-                scale=scale,
+            msg = (
+                "PyTorchBackend decode requires req_to_token and cache_seqlens "
+                "(paged KV cache metadata)"
             )
+            raise RuntimeError(msg)
 
         num_kv_heads = k_cache.shape[2]
 

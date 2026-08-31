@@ -6,6 +6,8 @@ Prepares derived tensors from Batch metadata:
 - write_loc: KV cache write locations (page table indices)
 - req_to_token: page table (num_reqs, max_seq_len)
 - cu_seqlens_q: cumulative sequence lengths for FlashAttention varlen
+- prefix_lens: cached prefix length per request (extend attention)
+- block_table: page IDs per request (paged KV cache attention)
 """
 
 __all__ = ["BatchContext"]
@@ -104,3 +106,26 @@ class BatchContext:
                     )
 
         batch.req_to_token = table
+
+        # Cached prefix length per request (extend attention reads these KV
+        # entries from the shared prefix pages in req_to_token).
+        batch.prefix_lens = torch.tensor(
+            [req.cached_len for req in reqs],
+            dtype=torch.int32,
+            device=self.device,
+        )
+
+        # Full page table (shared prefix pages first) for backends that
+        # address the KV cache by page ID (e.g. flash_attn_with_kvcache).
+        max_blocks = (self.max_seq_len + self.page_size - 1) // self.page_size
+        block_table = torch.full(
+            (num_reqs, max_blocks), -1, dtype=torch.int32, device=self.device
+        )
+        for i, req in enumerate(reqs):
+            handle = req.cache_handle
+            if handle is not None:
+                for j, page_id in enumerate(handle.page_ids):
+                    if j >= max_blocks:
+                        break
+                    block_table[i, j] = page_id
+        batch.block_table = block_table

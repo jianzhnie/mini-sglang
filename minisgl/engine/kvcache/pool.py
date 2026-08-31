@@ -9,10 +9,17 @@ import torch
 
 @dataclass
 class BaseCacheHandle:
-    """Tracks allocated KV cache pages for a request."""
+    """Tracks allocated KV cache pages for a request.
+
+    ``page_ids`` is the full page table for the request's tokens. When prefix
+    sharing is active (radix cache), the first ``num_shared`` pages are borrowed
+    from the cache tree and are owned by the tree, not by this request; the
+    remaining pages were allocated from the pool for this request.
+    """
 
     page_ids: list[int] = field(default_factory=list)
     cached_len: int = 0
+    num_shared: int = 0
 
     def num_pages(self) -> int:
         return len(self.page_ids)
@@ -22,10 +29,10 @@ class BaseCacheHandle:
 class CacheManager(Protocol):
     """Interface for KV cache managers (RadixCacheManager, NaiveCacheManager)."""
 
-    def match_prefix(self, input_ids: list[int]) -> int: ...
+    def match_prefix(self, input_ids: list[int]) -> tuple[int, list[int]]: ...
     def insert(self, input_ids: list[int], handle: BaseCacheHandle) -> None: ...
-    def evict(self, num_pages: int) -> object: ...
-    def remove(self, input_ids: list[int]) -> None: ...
+    def evict(self, num_pages: int) -> list[int]: ...
+    def remove(self, input_ids: list[int], handle: BaseCacheHandle) -> None: ...
 
 
 class KVCachePool:
@@ -78,10 +85,20 @@ class KVCachePool:
         return handle
 
     def free(self, handle: BaseCacheHandle) -> None:
-        """Return pages to the free pool."""
+        """Return pages to the free pool. Idempotent for empty handles."""
+        if not handle.page_ids:
+            return
         for page_id in handle.page_ids:
             self.free_pages.append(page_id)
         handle.page_ids.clear()
+
+    def free_pages_by_id(self, page_ids: list[int]) -> None:
+        """Return individual pages by ID.
+
+        Used by radix-tree eviction, where pages are owned by tree nodes
+        rather than by a single request handle.
+        """
+        self.free_pages.extend(page_ids)
 
     def free_count(self) -> int:
         return len(self.free_pages)

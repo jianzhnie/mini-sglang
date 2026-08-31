@@ -62,6 +62,7 @@ class Batch:
     cu_seqlens_q: torch.Tensor | None = None  # (num_reqs+1,) varlen boundaries
     block_table: torch.Tensor | None = None  # (num_reqs, max_blocks) page indices
     cache_seqlens: torch.Tensor | None = None  # (num_reqs,) cached token counts
+    prefix_lens: torch.Tensor | None = None  # (num_reqs,) cached prefix lengths
 
     def size(self) -> int:
         return len(self.reqs)

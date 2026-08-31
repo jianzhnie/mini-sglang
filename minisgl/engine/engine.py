@@ -13,8 +13,9 @@ __all__ = ["Engine"]
 import torch
 
 from minisgl.engine.context import BatchContext
-from minisgl.engine.kvcache.pool import KVCachePool
+from minisgl.engine.kvcache.pool import BaseCacheHandle, KVCachePool
 from minisgl.models.attention.backend import AttentionBackend
+from minisgl.models.layers.rope import RotaryEmbedding
 from minisgl.sampling.sampler import Sampler
 from minisgl.utils.device import (
     get_device,
@@ -74,6 +75,19 @@ class Engine:
         self.model = self._create_model()
         self.model.to(self.device)
         self.model.eval()
+        # No autograd during capture/replay (or any inference forward).
+        self.model.requires_grad_(False)
+
+        # Pre-build RoPE cos/sin tables on the compute device so per-layer
+        # forwards avoid host-device syncs and stay graph-capturable.
+        # RotaryEmbedding is not an nn.Module, so it never shows up in
+        # modules(); reach it via the attention modules' `rotary_emb` attr.
+        # OPT has no RoPE — the loop then simply finds nothing. prebuild()
+        # is idempotent, so per-layer instances are fine.
+        for module in self.model.modules():
+            rotary = getattr(module, "rotary_emb", None)
+            if isinstance(rotary, RotaryEmbedding):
+                rotary.prebuild(server_args.max_seq_len, self.device)
 
         # Load weights only if model path exists
         if server_args.model_path and _path_exists(server_args.model_path):
@@ -104,8 +118,13 @@ class Engine:
         self.sampler = Sampler(model_args.vocab_size)
 
         self._graphs: dict[int, object] = {}
-        self._graph_inputs: dict[int, tuple] = {}
+        self._graph_inputs: dict[int, dict] = {}
         self._graph_outputs: dict[int, torch.Tensor] = {}
+        # Trash page reserved from the pool for graph padding rows (set when
+        # graphs are captured); padding-row KV writes land here.
+        self._graph_pad_handle: BaseCacheHandle | None = None
+        self._graph_pad_page_id = 0
+        self._graph_pad_loc = 0
         if (
             server_args.cuda_graph_bs
             and server_args.cuda_graph_bs > 0
@@ -128,6 +147,12 @@ class Engine:
         self._graphs.clear()
         self._graph_inputs.clear()
         self._graph_outputs.clear()
+        # k_cache/v_cache are views into the pool buffer; drop them too or
+        # the pool's memory stays referenced and cannot be released.
+        # The graph pad handle is released together with the pool.
+        for attr in ("k_cache", "v_cache"):
+            if hasattr(self, attr):
+                delattr(self, attr)
         if hasattr(self, "kv_cache_pool"):
             del self.kv_cache_pool
         synchronize()
@@ -203,6 +228,10 @@ class Engine:
                     v_cache=self.v_cache,
                     write_loc=batch.write_loc,
                     cu_seqlens_q=batch.cu_seqlens_q,
+                    req_to_token=batch.req_to_token,
+                    prefix_lens=batch.prefix_lens,
+                    block_table=batch.block_table,
+                    forward_mode="prefill",
                 )
 
         # Decode: try execution graph first, fall back to eager
@@ -227,6 +256,7 @@ class Engine:
                     cache_seqlens=batch.cache_seqlens,
                     block_table=batch.block_table,
                     req_to_token=batch.req_to_token,
+                    forward_mode="decode",
                 )
 
     def _find_graph(self, batch_size: int) -> tuple | None:
