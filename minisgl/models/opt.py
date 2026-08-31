@@ -13,7 +13,6 @@ __all__ = [
     "OPTDecoderLayer",
     "OPTForCausalLM",
     "OPTModel",
-    "load_opt_weights",
 ]
 import torch
 import torch.nn as nn
@@ -22,7 +21,7 @@ import torch.nn.functional as F
 from minisgl.models.layers.attention import BaseAttention
 from minisgl.models.layers.embedding import VocabParallelEmbedding
 from minisgl.models.layers.linear import ColumnParallelLinear, RowParallelLinear
-from minisgl.utils.device import get_tp_size
+from minisgl.utils.device import get_tp_rank, get_tp_size
 
 
 class LayerNorm(nn.Module):
@@ -65,7 +64,7 @@ class OPTAttention(BaseAttention):
         self.hidden_size = hidden_size
         tp_size = get_tp_size()
         self.num_local_heads = num_heads // tp_size
-        self.num_local_kv_heads = num_heads // tp_size
+        self.num_local_kv_heads = max(1, num_heads // tp_size)
 
         self.q_proj = ColumnParallelLinear(
             hidden_size, num_heads * self.head_dim, bias=bias
@@ -136,7 +135,13 @@ class OPTDecoderLayer(nn.Module):
 
 
 class OPTModel(nn.Module):
-    """OPT transformer decoder model."""
+    """OPT transformer decoder model.
+
+    Known numerical difference vs HF: HF's OPTLearnedPositionalEmbedding has
+    a +2 index offset (padding_idx) — position p reads row p + 2. This
+    implementation indexes the table directly with `positions` (teaching
+    simplification), so logits differ from HF OPT by that offset.
+    """
 
     def __init__(self, config) -> None:
         super().__init__()
@@ -216,19 +221,25 @@ class OPTForCausalLM(nn.Module):
         )
         return self.lm_head(hidden_states)
 
+    def tie_weights(self, state_dict: dict) -> None:
+        """Tie lm_head weight to embed_tokens when config says so.
 
-def load_opt_weights(model: OPTForCausalLM, state_dict: dict) -> None:
-    """Load OPT weights with HF key remapping."""
-    params = dict(model.named_parameters())
-
-    for hf_name, weight in state_dict.items():
-        mini_name = hf_name
-        if mini_name in params:
-            param = params[mini_name]
-            if param.shape == weight.shape:
-                param.data.copy_(weight)
-            else:
-                param.data.copy_(weight[: param.shape[0]])
-
-    if model.config.tie_word_embeddings:
-        model.lm_head.weight.data.copy_(model.model.embed_tokens.weight.data)
+        HF OPT checkpoints with tie_word_embeddings=True omit lm_head.weight;
+        the engine remaps model keys with model. → model.decoder., so the
+        embedding lives at "model.decoder.embed_tokens.weight" in state_dict.
+        """
+        if not self.config.tie_word_embeddings:
+            return
+        if "lm_head.weight" in state_dict:
+            return  # Checkpoint carries an untied lm_head; already loaded.
+        embed_key = "model.decoder.embed_tokens.weight"
+        if embed_key not in state_dict:
+            return
+        if get_tp_size() > 1:
+            tp_rank = get_tp_rank()
+            vocab_per_rank = self.config.vocab_size // get_tp_size()
+            start = tp_rank * vocab_per_rank
+            end = (tp_rank + 1) * vocab_per_rank
+            self.lm_head.weight.data.copy_(state_dict[embed_key][start:end])
+        else:
+            self.lm_head.weight.data.copy_(state_dict[embed_key])

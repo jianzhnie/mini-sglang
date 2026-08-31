@@ -69,11 +69,15 @@ class DecodeManager:
         self._block_table_buf[:num_reqs].fill_(-1)
         self._req_to_token_buf[:num_reqs].fill_(-1)
 
+        max_seqlen = 0
         for i, req in enumerate(running):
             total_len = len(req.input_ids)
+            max_seqlen = max(max_seqlen, total_len)
             self._input_ids_buf[i, 0] = req.input_ids[-1]
             self._positions_buf[i, 0] = total_len - 1
-            self._cache_seqlens_buf[i] = total_len - 1
+            # cache_seqlens semantics: total length INCLUDING the current
+            # token (matches flash_attn_with_kvcache).
+            self._cache_seqlens_buf[i] = total_len
 
             handle = req.cache_handle
             if handle is not None:
@@ -111,4 +115,6 @@ class DecodeManager:
         batch.cache_seqlens = self._cache_seqlens_buf[:num_reqs].clone()
         batch.block_table = self._block_table_buf[:num_reqs]
         batch.req_to_token = self._req_to_token_buf[:num_reqs]
+        # Python int, so attention backends can size gathers without .item().
+        batch.max_seqlen = max_seqlen
         return batch

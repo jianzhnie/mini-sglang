@@ -36,7 +36,7 @@ class Qwen2Attention(BaseAttention):
         self.hidden_size = config.hidden_size
         tp_size = get_tp_size()
         self.num_local_heads = self.num_heads // tp_size
-        self.num_local_kv_heads = self.num_kv_heads // tp_size
+        self.num_local_kv_heads = max(1, self.num_kv_heads // tp_size)
 
         self.q_proj = ColumnParallelLinear(
             self.hidden_size, self.num_heads * self.head_dim, bias=True

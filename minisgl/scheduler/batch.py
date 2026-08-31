@@ -61,8 +61,12 @@ class Batch:
     req_to_token: torch.Tensor | None = None  # (num_reqs, max_seq_len) page table
     cu_seqlens_q: torch.Tensor | None = None  # (num_reqs+1,) varlen boundaries
     block_table: torch.Tensor | None = None  # (num_reqs, max_blocks) page indices
-    cache_seqlens: torch.Tensor | None = None  # (num_reqs,) cached token counts
+    cache_seqlens: torch.Tensor | None = None  # (num_reqs,) total lens incl. current
     prefix_lens: torch.Tensor | None = None  # (num_reqs,) cached prefix lengths
+    # Max sequence length of the batch as a Python int (prefill: max uncached
+    # len; decode: max total len). Lets attention backends avoid .item()
+    # host syncs, which are also illegal during CUDA graph capture.
+    max_seqlen: int | None = None
 
     def size(self) -> int:
         return len(self.reqs)

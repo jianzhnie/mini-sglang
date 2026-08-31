@@ -29,7 +29,7 @@ class LLM:
         tp_size: int = 1,
         attention_backend: str = "fa",
         dtype: str = "auto",
-        trust_remote_code: bool = True,
+        trust_remote_code: bool = False,
         max_seq_len: int = 8192,
         memory_ratio: float = 0.9,
     ) -> None:
@@ -50,7 +50,7 @@ class LLM:
         logger.info("Loading model from %s", model_path)
         self.engine = Engine(server_args, model_args, tp_rank=0)
         self.scheduler = Scheduler(server_args, self.engine)
-        self.tokenizer = TokenizerWorker(model_path)
+        self.tokenizer = TokenizerWorker(model_path, trust_remote_code=trust_remote_code)
 
         logger.info("LLM ready")
 

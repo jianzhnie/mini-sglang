@@ -69,6 +69,16 @@ class Engine:
 
         if self.tp_size > 1:
             init_distributed(tp_rank=tp_rank, tp_size=self.tp_size)
+            if model_args.num_kv_heads % self.tp_size != 0:
+                # Teaching simplification: KV heads are not truly divisible,
+                # so ranks replicate heads (max(1, ...) in each attention
+                # module and the KV pool) instead of erroring out.
+                logger.warning(
+                    "num_kv_heads=%d not divisible by tp_size=%d; KV heads will "
+                    "be replicated across ranks (no exact sharding)",
+                    model_args.num_kv_heads,
+                    self.tp_size,
+                )
 
         AttentionBackend.configure(server_args.attention_backend)
 
@@ -104,6 +114,13 @@ class Engine:
             logger.info("Loaded %d weights (model_type=%s)", loaded, model_type)
             if hasattr(self.model, "tie_weights"):
                 self.model.tie_weights(state_dict)
+            # Fused-expert MoE models (e.g. Qwen3MoE) aggregate HF's
+            # per-expert weights (mlp.experts.{i}.*) into fused tensors
+            # themselves; load_weights_parallel cannot match those keys.
+            load_hf_experts = getattr(self.model, "load_hf_experts", None)
+            if load_hf_experts is not None:
+                n_expert = load_hf_experts(state_dict)
+                logger.info("Loaded %d fused expert weights", n_expert)
 
         self.kv_cache_pool = self._allocate_kv_cache()
         self._assign_kv_cache()
@@ -181,14 +198,16 @@ class Engine:
             available_mem = 512 * 1024 * 1024  # 512 MB for CPU
 
         dtype_itemsize = self.model.lm_head.weight.dtype.itemsize
+        # Match the attention modules: replicate KV heads when num_kv_heads
+        # is not divisible by tp_size (never allocate a 0-head buffer).
+        num_kv_heads_per_rank = max(1, ma.num_kv_heads // self.tp_size)
         bytes_per_page = (
             2
             * ma.num_layers
             * args.page_size
-            * ma.num_kv_heads
+            * num_kv_heads_per_rank
             * ma.head_dim
             * dtype_itemsize
-            // self.tp_size
         )
 
         num_pages = max(1, available_mem // bytes_per_page)
@@ -203,7 +222,7 @@ class Engine:
             num_layers=ma.num_layers,
             num_pages=num_pages,
             page_size=args.page_size,
-            num_kv_heads=ma.num_kv_heads // self.tp_size,
+            num_kv_heads=num_kv_heads_per_rank,
             head_dim=ma.head_dim,
             dtype=self.model.lm_head.weight.dtype,
             device=self.device,
@@ -231,20 +250,32 @@ class Engine:
                     req_to_token=batch.req_to_token,
                     prefix_lens=batch.prefix_lens,
                     block_table=batch.block_table,
+                    max_seqlen=batch.max_seqlen,
                     forward_mode="prefill",
                 )
 
         # Decode: try execution graph first, fall back to eager
         bs = len(batch.reqs)
         graph = self._find_graph(bs)
-        if graph is not None and batch.write_loc is not None:
+        if graph is not None:
             graph_bs, ins, outs = graph
             with torch.inference_mode():
-                ins["input_ids"][:bs].copy_(batch.input_ids.squeeze(1))
-                ins["positions"][:bs].copy_(batch.positions.squeeze(1))
+                ins["input_ids"][:bs].copy_(batch.input_ids)
+                ins["positions"][:bs].copy_(batch.positions)
                 ins["write_loc"][:bs].copy_(batch.write_loc)
+                ins["cache_seqlens"][:bs].copy_(batch.cache_seqlens)
+                ins["block_table"][:bs].copy_(batch.block_table)
+                ins["req_to_token"][:bs].copy_(batch.req_to_token)
+                # Padding rows point at the reserved trash page so their KV
+                # writes and reads never touch real requests' pages.
+                if bs < graph_bs:
+                    ins["write_loc"][bs:].fill_(self._graph_pad_loc)
+                    ins["cache_seqlens"][bs:].fill_(1)
+                    ins["block_table"][bs:].fill_(self._graph_pad_page_id)
+                    ins["req_to_token"][bs:].fill_(self._graph_pad_loc)
                 self._graphs[graph_bs].replay()
-                return outs[:bs]
+                # Clone: outs is a static buffer overwritten by the next replay.
+                return outs[:bs].clone()
         else:
             with torch.inference_mode():
                 return self.model(
@@ -256,6 +287,7 @@ class Engine:
                     cache_seqlens=batch.cache_seqlens,
                     block_table=batch.block_table,
                     req_to_token=batch.req_to_token,
+                    max_seqlen=batch.max_seqlen,
                     forward_mode="decode",
                 )
 
@@ -330,6 +362,19 @@ class Engine:
         batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
         batch_sizes = [bs for bs in batch_sizes if bs <= max_bs]
 
+        # Reserve one trash page from the pool: padding rows of padded graph
+        # batches write/read KV into this page instead of polluting real
+        # requests. Released together with the pool at cleanup.
+        try:
+            self._graph_pad_handle = self.kv_cache_pool.alloc(1)
+        except RuntimeError as e:
+            logger.warning(
+                "Cannot reserve a pad page for graphs (%s); skipping capture", e
+            )
+            return
+        self._graph_pad_page_id = self._graph_pad_handle.page_ids[0]
+        self._graph_pad_loc = self._graph_pad_page_id * self.server_args.page_size
+
         logger.info(
             "Capturing %s graphs for batch sizes: %s",
             self._device_type.upper(),
@@ -340,62 +385,88 @@ class Engine:
             self._capture_graph_safe(bs)
 
     def _capture_graph_safe(self, batch_size: int) -> None:
-        """Capture an execution graph, logging but not raising on failure."""
+        """Capture an execution graph, logging but not raising on failure.
+
+        On failure the engine simply falls back to eager execution for this
+        batch size (decode works without graphs, just slower).
+        """
         try:
             self._capture_graph(batch_size)
         except RuntimeError as e:
-            logger.warning("Failed to capture graph for bs=%d: %s", batch_size, e)
+            logger.warning(
+                "Failed to capture graph for bs=%d: %s. "
+                "Falling back to eager execution for this batch size.",
+                batch_size,
+                e,
+            )
 
     def _capture_graph(self, batch_size: int) -> None:
         """Capture a single execution graph for a given batch size.
 
-        Supports both CUDA graphs and NPU graphs (via torch.npu).
+        Supports both CUDA graphs and NPU graphs (via torch.npu). Static
+        input buffers mirror the real decode metadata produced by
+        DecodeManager (same shapes/dtypes), so replay only needs copy_
+        into these buffers. All entries point at the trash pad page.
         """
         device = self.device
+        args = self.server_args
+        max_blocks = (args.max_seq_len + args.page_size - 1) // args.page_size
+        pad_page = self._graph_pad_page_id
+        pad_loc = self._graph_pad_loc
 
-        input_ids = torch.ones(batch_size, dtype=torch.long, device=device)
-        positions = torch.zeros(batch_size, dtype=torch.long, device=device)
-        write_loc = torch.zeros(batch_size, dtype=torch.int32, device=device)
+        input_ids = torch.ones(batch_size, 1, dtype=torch.long, device=device)
+        positions = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
+        write_loc = torch.full(
+            (batch_size,), pad_loc, dtype=torch.int32, device=device
+        )
+        cache_seqlens = torch.ones(batch_size, dtype=torch.int32, device=device)
+        block_table = torch.full(
+            (batch_size, max_blocks), pad_page, dtype=torch.int32, device=device
+        )
+        req_to_token = torch.full(
+            (batch_size, args.max_seq_len), pad_loc, dtype=torch.int32, device=device
+        )
 
-        # Warmup
-        for _ in range(3):
-            with torch.inference_mode():
-                self.model(
-                    input_ids=input_ids,
-                    positions=positions,
-                    k_cache=self.k_cache,
-                    v_cache=self.v_cache,
-                    write_loc=write_loc,
-                )
+        def run_decode() -> torch.Tensor:
+            return self.model(
+                input_ids=input_ids,
+                positions=positions,
+                k_cache=self.k_cache,
+                v_cache=self.v_cache,
+                write_loc=write_loc,
+                cache_seqlens=cache_seqlens,
+                block_table=block_table,
+                req_to_token=req_to_token,
+                # Static Python int: keeps the captured graph free of .item()
+                # host syncs in the PyTorch attention backend.
+                max_seqlen=args.max_seq_len,
+                forward_mode="decode",
+            )
 
-        if self._device_type == "npu":
-            import os
+        with torch.inference_mode():
+            # Warmup
+            for _ in range(3):
+                run_decode()
 
-            os.environ.setdefault("TASK_QUEUE_ENABLE", "1")
-            graph = torch.npu.NPUGraph()
-            with torch.npu.graph(graph):
-                output = self.model(
-                    input_ids=input_ids,
-                    positions=positions,
-                    k_cache=self.k_cache,
-                    v_cache=self.v_cache,
-                    write_loc=write_loc,
-                )
-        else:
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                output = self.model(
-                    input_ids=input_ids,
-                    positions=positions,
-                    k_cache=self.k_cache,
-                    v_cache=self.v_cache,
-                    write_loc=write_loc,
-                )
+            if self._device_type == "npu":
+                import os
+
+                os.environ.setdefault("TASK_QUEUE_ENABLE", "1")
+                graph = torch.npu.NPUGraph()
+                with torch.npu.graph(graph):
+                    output = run_decode()
+            else:
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    output = run_decode()
 
         self._graphs[batch_size] = graph
         self._graph_inputs[batch_size] = {
             "input_ids": input_ids,
             "positions": positions,
             "write_loc": write_loc,
+            "cache_seqlens": cache_seqlens,
+            "block_table": block_table,
+            "req_to_token": req_to_token,
         }
         self._graph_outputs[batch_size] = output

@@ -82,6 +82,9 @@ class BatchContext:
         cu = torch.zeros(len(seq_lengths) + 1, dtype=torch.int32)
         cu[1:] = seq_lens_t.cumsum(0)
         batch.cu_seqlens_q = cu.to(device=self.device)
+        # Max uncached length as a Python int — backends use it for FA varlen
+        # sizing without a host sync (.item()).
+        batch.max_seqlen = max(seq_lengths) if seq_lengths else 0
 
         num_reqs = len(reqs)
         table = torch.full(

@@ -577,7 +577,8 @@ class TestModelDummy(unittest.TestCase):
         write_loc = torch.tensor([8], dtype=torch.int32)
         # Paged KV metadata: tokens 0..8 live in flat slots 0..8
         req_to_token = torch.arange(9, dtype=torch.int32).unsqueeze(0)
-        cache_seqlens = torch.tensor([8], dtype=torch.int32)
+        # cache_seqlens semantics: total length INCLUDING the current token.
+        cache_seqlens = torch.tensor([9], dtype=torch.int32)
 
         with torch.inference_mode():
             logits = model(
@@ -624,24 +625,254 @@ class TestQwen3MoEModel(unittest.TestCase):
             logits = model(input_ids=input_ids, positions=positions)
         self.assertEqual(logits.shape, (1, 8, 1000))
 
+    def test_moe_mlp_accepts_2d_input(self):
+        """Prefill feeds 2-D (total_tokens, hidden) into the MLP — must not crash."""
+        from minisgl.models.qwen3_moe import Qwen3MoEMLP
 
-# ── Test FusedMoE ──
-class TestFusedMoE(unittest.TestCase):
-    def test_fused_moe_pytorch(self):
-        from minisgl.models.moe.fused_moe import fused_moe_pytorch
+        mlp = Qwen3MoEMLP(
+            hidden_size=16,
+            moe_intermediate_size=8,
+            num_experts=4,
+            num_experts_per_tok=2,
+        )
+        with torch.inference_mode():
+            out_2d = mlp(torch.randn(5, 16))
+            out_3d = mlp(torch.randn(2, 5, 16))
+        self.assertEqual(out_2d.shape, (5, 16))
+        self.assertEqual(out_3d.shape, (2, 5, 16))
+        self.assertFalse(torch.isnan(out_2d).any())
 
-        total_tokens, hidden_size = 4, 64
-        num_experts, intermediate_size = 4, 128
+    def test_moe_routing_matches_hf_semantics(self):
+        """HF routing: softmax over ALL experts -> top-k -> renormalize.
 
-        x = torch.randn(total_tokens, hidden_size)
-        router_logits = torch.randn(total_tokens, num_experts)
-        gate_w = torch.randn(num_experts, intermediate_size, hidden_size)
-        up_w = torch.randn(num_experts, intermediate_size, hidden_size)
-        down_w = torch.randn(num_experts, hidden_size, intermediate_size)
+        Hand-checkable case: num_experts_per_tok=1 with zero router logits
+        gives softmax weight 1/E for every expert; top-1 selects any one of
+        them and renormalizes its weight to 1.0. With identity expert
+        projections the output must be silu(x) * x.
+        """
+        import torch.nn.functional as F
 
-        out = fused_moe_pytorch(x, router_logits, gate_w, up_w, down_w, top_k=2)
-        self.assertEqual(out.shape, (total_tokens, hidden_size))
-        self.assertFalse(torch.isnan(out).any())
+        from minisgl.models.qwen3_moe import Qwen3MoEMLP
+
+        hidden = 4
+        mlp = Qwen3MoEMLP(
+            hidden_size=hidden,
+            moe_intermediate_size=hidden,
+            num_experts=2,
+            num_experts_per_tok=1,
+        )
+        with torch.no_grad():
+            mlp.gate.weight.zero_()  # uniform logits -> softmax = 1/2 each
+            eye = torch.eye(hidden)
+            mlp.expert_gate.copy_(eye.expand(2, hidden, hidden))
+            mlp.expert_up.copy_(eye.expand(2, hidden, hidden))
+            mlp.expert_down.copy_(eye.expand(2, hidden, hidden))
+
+        x = torch.randn(3, hidden)
+        with torch.inference_mode():
+            out = mlp(x)
+        # weight renormalizes to 1.0 -> output == expert(x) exactly
+        expected = F.silu(x) * x
+        self.assertTrue(torch.allclose(out, expected, atol=1e-6))
+
+    def test_load_hf_experts_aggregation(self):
+        """Per-expert HF keys must land in the fused expert tensors."""
+        from minisgl.models.qwen3_moe import Qwen3MoEMLP
+
+        mlp = Qwen3MoEMLP(
+            hidden_size=4,
+            moe_intermediate_size=3,
+            num_experts=2,
+            num_experts_per_tok=1,
+        )
+        state_dict = {}
+        for i in range(2):
+            for proj in ("gate_proj", "up_proj"):
+                state_dict[f"model.layers.0.mlp.experts.{i}.{proj}.weight"] = (
+                    torch.full((3, 4), float(i + 1))
+                )
+            state_dict[f"model.layers.0.mlp.experts.{i}.down_proj.weight"] = (
+                torch.full((4, 3), float(i + 1))
+            )
+
+        class _FakeLayer:
+            pass
+
+        layer = _FakeLayer()
+        layer.mlp = mlp
+
+        class _FakeModel:
+            layers = [layer]
+
+        class _FakeCausalLM:
+            model = _FakeModel()
+
+        # Call the unbound method on a minimal stand-in.
+        from minisgl.models.qwen3_moe import Qwen3MoEForCausalLM
+
+        loaded = Qwen3MoEForCausalLM.load_hf_experts(_FakeCausalLM(), state_dict)
+        self.assertEqual(loaded, 6)
+        self.assertTrue(torch.all(mlp.expert_gate[0] == 1.0))
+        self.assertTrue(torch.all(mlp.expert_down[1] == 2.0))
+
+
+# ── Test OPT tie_weights ──
+class TestOPTTieWeights(unittest.TestCase):
+    def test_tie_weights_binds_lm_head(self):
+        from minisgl.config import ModelArgs
+        from minisgl.models.opt import OPTForCausalLM
+
+        config = ModelArgs(
+            hidden_size=32,
+            num_layers=1,
+            num_attention_heads=2,
+            num_kv_heads=2,
+            intermediate_size=64,
+            vocab_size=50,
+            max_position_embeddings=16,
+            head_dim=16,
+            tie_word_embeddings=True,
+        )
+        model = OPTForCausalLM(config)
+        embed = torch.randn(50, 32)
+        # HF key after the engine's model. -> model.decoder. remap.
+        state_dict = {"model.decoder.embed_tokens.weight": embed}
+        model.tie_weights(state_dict)
+        self.assertTrue(torch.equal(model.lm_head.weight.data, embed))
+
+    def test_tie_weights_skips_untied_checkpoint(self):
+        from minisgl.config import ModelArgs
+        from minisgl.models.opt import OPTForCausalLM
+
+        config = ModelArgs(
+            hidden_size=32,
+            num_layers=1,
+            num_attention_heads=2,
+            num_kv_heads=2,
+            intermediate_size=64,
+            vocab_size=50,
+            max_position_embeddings=16,
+            head_dim=16,
+            tie_word_embeddings=True,
+        )
+        model = OPTForCausalLM(config)
+        lm_head = torch.randn(50, 32)
+        state_dict = {
+            "lm_head.weight": lm_head,
+            "model.decoder.embed_tokens.weight": torch.randn(50, 32),
+        }
+        before = model.lm_head.weight.data.clone()
+        model.tie_weights(state_dict)
+        # Untied lm_head in checkpoint: leave it untouched.
+        self.assertTrue(torch.equal(model.lm_head.weight.data, before))
+
+
+# ── Test Sliding Window (Mistral) ──
+class TestSlidingWindow(unittest.TestCase):
+    def test_prefill_band_mask(self):
+        """PT prefill with sliding_window: query i attends keys [i-w+1, i]."""
+        import torch.nn.functional as F
+
+        from minisgl.models.attention.backend import PyTorchBackend
+
+        torch.manual_seed(0)
+        num_heads, seq_len, head_dim, window = 2, 5, 8, 2
+        q = torch.randn(1, num_heads, seq_len, head_dim)
+        k = torch.randn(1, num_heads, seq_len, head_dim)
+        v = torch.randn(1, num_heads, seq_len, head_dim)
+
+        out = PyTorchBackend.forward(q, k, v, sliding_window=window)
+
+        pos = torch.arange(seq_len)
+        allow = (pos.unsqueeze(0) <= pos.unsqueeze(1)) & (
+            pos.unsqueeze(0) > pos.unsqueeze(1) - window
+        )
+        bias = torch.zeros(seq_len, seq_len)
+        bias.masked_fill_(~allow, float("-inf"))
+        ref = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
+        self.assertTrue(torch.allclose(out, ref, atol=1e-6))
+
+    def test_decode_band_mask(self):
+        """PT decode with sliding_window: keys older than the window are masked."""
+        import torch.nn.functional as F
+
+        from minisgl.models.attention.backend import PyTorchBackend
+
+        torch.manual_seed(0)
+        num_heads, head_dim, window = 2, 8, 3
+        total = 6  # cache_seqlens = total length including current token
+
+        k_cache = torch.randn(4, 4, num_heads, head_dim)  # 16 slots
+        v_cache = torch.randn(4, 4, num_heads, head_dim)
+        q = torch.randn(1, num_heads, 1, head_dim)
+        req_to_token = torch.arange(total, dtype=torch.int32).unsqueeze(0)
+        cache_seqlens = torch.tensor([total], dtype=torch.int32)
+
+        out = PyTorchBackend.forward(
+            q,
+            q,
+            q,
+            k_cache=k_cache,
+            v_cache=v_cache,
+            req_to_token=req_to_token,
+            cache_seqlens=cache_seqlens,
+            max_seqlen=total,
+            sliding_window=window,
+            forward_mode="decode",
+        )
+
+        flat_k = k_cache.view(-1, num_heads, head_dim)[:total].transpose(0, 1)
+        flat_v = v_cache.view(-1, num_heads, head_dim)[:total].transpose(0, 1)
+        q_pos = total - 1
+        k_pos = torch.arange(total)
+        allow = k_pos > q_pos - window  # band; all keys are <= q_pos anyway
+        bias = torch.zeros(1, total)
+        bias.masked_fill_(~allow.unsqueeze(0), float("-inf"))
+        ref = F.scaled_dot_product_attention(
+            q, flat_k.unsqueeze(0), flat_v.unsqueeze(0), attn_mask=bias.unsqueeze(1)
+        )
+        self.assertEqual(out.shape, (1, num_heads, 1, head_dim))
+        self.assertTrue(torch.allclose(out, ref, atol=1e-6))
+
+
+# ── Test Decode vs Full Attention ──
+class TestDecodeMatchesFullAttention(unittest.TestCase):
+    def test_decode_with_cache_matches_full(self):
+        """PT decode with cache_seqlens=total_len must match full attention
+        over the whole sequence (query = last position only)."""
+        import torch.nn.functional as F
+
+        from minisgl.models.attention.backend import PyTorchBackend
+
+        torch.manual_seed(0)
+        num_heads, head_dim, total = 4, 16, 7
+        k_cache = torch.zeros(2, 8, num_heads, head_dim)
+        v_cache = torch.zeros(2, 8, num_heads, head_dim)
+        k_full = torch.randn(1, num_heads, total, head_dim)
+        v_full = torch.randn(1, num_heads, total, head_dim)
+        # tokens 0..total-1 (incl. current) already written to flat slots
+        k_cache.view(-1, num_heads, head_dim)[:total] = k_full[0].transpose(0, 1)
+        v_cache.view(-1, num_heads, head_dim)[:total] = v_full[0].transpose(0, 1)
+
+        q = torch.randn(1, num_heads, 1, head_dim)
+        req_to_token = torch.arange(total, dtype=torch.int32).unsqueeze(0)
+        cache_seqlens = torch.tensor([total], dtype=torch.int32)
+
+        out = PyTorchBackend.forward(
+            q,
+            q,
+            q,
+            k_cache=k_cache,
+            v_cache=v_cache,
+            req_to_token=req_to_token,
+            cache_seqlens=cache_seqlens,
+            max_seqlen=total,
+            forward_mode="decode",
+        )
+        ref = F.scaled_dot_product_attention(
+            q, k_full, v_full, is_causal=False
+        )  # single query at the last position sees all keys
+        self.assertTrue(torch.allclose(out, ref, atol=1e-5))
 
 
 # ── Test Model Registry ──
@@ -870,6 +1101,9 @@ class TestDecodeManager(unittest.TestCase):
         self.assertIsNotNone(batch.write_loc)
         self.assertIsNotNone(batch.block_table)
         self.assertIsNotNone(batch.cache_seqlens)
+        # cache_seqlens semantics: total length including the current token.
+        self.assertEqual(batch.cache_seqlens.tolist(), [5])
+        self.assertEqual(batch.max_seqlen, 5)
 
     def test_schedule_decode_empty(self):
         from minisgl.config import ServerArgs

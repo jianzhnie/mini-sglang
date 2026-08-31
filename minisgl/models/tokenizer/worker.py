@@ -1,48 +1,28 @@
-"""Tokenizer worker process: handles token encode/decode via ZMQ."""
+"""Tokenizer worker: wraps a HuggingFace tokenizer for encode/decode.
 
-__all__ = ["DetokenizeMsg", "TokenizeMsg", "TokenizerWorker", "UserMsg"]
-from dataclasses import dataclass
+In-process implementation (SGLang runs this as a separate ZMQ process; the
+teaching version keeps everything in one process).
+"""
+
+__all__ = ["TokenizerWorker"]
 
 from minisgl.utils.logger import logger
 
 
-@dataclass
-class TokenizeMsg:
-    uid: int
-    text: str
-
-
-@dataclass
-class DetokenizeMsg:
-    uid: int
-    token_id: int
-    finished: bool
-
-
-@dataclass
-class UserMsg:
-    uid: int
-    input_ids: list[int]
-    sampling_params: dict | None = None
-
-
 class TokenizerWorker:
-    """Wraps a HuggingFace tokenizer for encode/decode operations.
+    """Wraps a HuggingFace tokenizer for encode/decode operations."""
 
-    In a multi-process architecture, this runs as a separate process
-    communicating via ZMQ sockets. For simplicity, the in-process
-    version is used by default.
-    """
-
-    def __init__(self, model_path: str) -> None:
+    def __init__(self, model_path: str, trust_remote_code: bool = False) -> None:
         from transformers import AutoTokenizer
 
         logger.info("Loading tokenizer from %s", model_path)
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_path,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
         )
-        self.eos_token_id = self.tokenizer.eos_token_id or 151643
+        # Keep the tokenizer's own eos_token_id as-is (may be None); the
+        # Scheduler has its own EOS fallback logic and handles None.
+        self.eos_token_id = self.tokenizer.eos_token_id
 
     def encode(self, text: str) -> list[int]:
         """Encode text to token IDs."""

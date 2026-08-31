@@ -3,6 +3,13 @@
 Qwen3MoEForCausalLM:
 - Same as Qwen3 but with MoE FFN blocks replacing standard MLP at specific layers
 - MoE Router: linear layer selecting top-k experts
+
+Aligned with HF Qwen3MoESparseMoeBlock:
+- mlp.gate is the router; mlp.experts.{i}.{gate_proj,up_proj,down_proj} are
+  the per-expert weights (stored here as fused 3-D tensors).
+- No shared expert.
+- Routing: softmax over ALL experts, then top-k, then renormalize the
+  selected weights to sum to 1 (HF norm_topk_prob=True).
 """
 
 __all__ = [
@@ -19,25 +26,27 @@ from minisgl.models.decoder import (
     RMSNormForCausalLM,
 )
 from minisgl.models.layers.embedding import VocabParallelEmbedding
-from minisgl.models.layers.linear import ColumnParallelLinear, RowParallelLinear
 from minisgl.models.layers.rms_norm import RMSNorm
 from minisgl.models.qwen3 import Qwen3Attention
 from minisgl.utils.device import get_tp_size
 
 
 class Qwen3MoEMLP(nn.Module):
-    """Mixture of Experts MLP for Qwen3-MoE.
+    """Sparse MoE MLP matching HF Qwen3MoESparseMoeBlock (no shared expert).
 
-    Architecture:
-    - Router: linear layer predicting expert probabilities
-    - Shared experts: always-active experts
-    - Routed experts: top-k selected experts
+    Expert weights are stored fused: expert_gate/up are
+    (num_experts, moe_intermediate_size, hidden_size) and expert_down is
+    (num_experts, hidden_size, moe_intermediate_size). HF's per-expert keys
+    are aggregated into these tensors by load_hf_experts().
+
+    Teaching simplification: expert weights are not sharded across TP ranks
+    and there is no all-reduce on expert outputs, so tensor parallelism is
+    unsupported here.
     """
 
     def __init__(
         self,
         hidden_size: int,
-        intermediate_size: int,
         moe_intermediate_size: int,
         num_experts: int,
         num_experts_per_tok: int,
@@ -49,48 +58,44 @@ class Qwen3MoEMLP(nn.Module):
         self.moe_intermediate_size = moe_intermediate_size
 
         tp_size = get_tp_size()
-
-        self.router = nn.Linear(hidden_size, num_experts, bias=False)
-
-        self.shared_gate = ColumnParallelLinear(
-            hidden_size, moe_intermediate_size, bias=False
-        )
-        self.shared_up = ColumnParallelLinear(
-            hidden_size, moe_intermediate_size, bias=False
-        )
-        self.shared_down = RowParallelLinear(
-            moe_intermediate_size, hidden_size, bias=False
+        assert tp_size == 1, (
+            f"Qwen3MoEMLP does not support tensor parallelism "
+            f"(tp_size={tp_size}): experts are not sharded and there is no "
+            "all-reduce. Run with --tp-size 1."
         )
 
-        self.num_local_experts = num_experts // tp_size
-        experts_per_rank = moe_intermediate_size // tp_size
+        # Router (HF name: mlp.gate).
+        self.gate = nn.Linear(hidden_size, num_experts, bias=False)
 
         self.expert_gate = nn.Parameter(
-            torch.empty(self.num_local_experts, experts_per_rank, hidden_size),
+            torch.empty(num_experts, moe_intermediate_size, hidden_size),
         )
         self.expert_up = nn.Parameter(
-            torch.empty(self.num_local_experts, experts_per_rank, hidden_size),
+            torch.empty(num_experts, moe_intermediate_size, hidden_size),
         )
         self.expert_down = nn.Parameter(
-            torch.empty(self.num_local_experts, hidden_size, experts_per_rank),
+            torch.empty(num_experts, hidden_size, moe_intermediate_size),
         )
+        # torch.empty leaves garbage (possibly NaN) until weights load;
+        # give experts a sane default init like nn.Linear does.
+        for p in (self.expert_gate, self.expert_up, self.expert_down):
+            nn.init.normal_(p, std=0.02)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        batch_size, seq_len, hidden_dim = hidden_states.shape
-        flat = hidden_states.view(-1, hidden_dim)
+        # Accept both prefill's 2-D (total_tokens, hidden) and 3-D input.
+        flat = hidden_states.view(-1, self.hidden_size)
 
-        shared_out = self.shared_down(
-            F.silu(self.shared_gate(flat)) * self.shared_up(flat),
+        router_logits = self.gate(flat)
+        # HF routing semantics: softmax over ALL experts first, then top-k,
+        # then renormalize the selected weights to sum to 1.
+        routing_weights = F.softmax(router_logits, dim=-1)
+        top_weights, selected_experts = torch.topk(
+            routing_weights, self.num_experts_per_tok, dim=-1
         )
+        top_weights = top_weights / top_weights.sum(dim=-1, keepdim=True)
 
-        router_logits = self.router(flat)
-        router_weights, selected_experts = torch.topk(
-            router_logits, self.num_experts_per_tok, dim=-1
-        )
-        router_weights = F.softmax(router_weights, dim=-1)
-
-        routed_out = self._fused_moe(flat, router_weights, selected_experts)
-        return (shared_out + routed_out).view(batch_size, seq_len, hidden_dim)
+        out = self._fused_moe(flat, top_weights, selected_experts)
+        return out.view(*hidden_states.shape)
 
     def _fused_moe(
         self,
@@ -101,7 +106,7 @@ class Qwen3MoEMLP(nn.Module):
         total_tokens, hidden_dim = x.shape
         output = torch.zeros(total_tokens, hidden_dim, dtype=x.dtype, device=x.device)
 
-        for expert_idx in range(self.num_local_experts):
+        for expert_idx in range(self.num_experts):
             mask = (selected_experts == expert_idx).any(dim=-1)
             if not mask.any():
                 continue
@@ -150,7 +155,6 @@ class Qwen3MoEModel(nn.Module):
         if is_moe:
             mlp = Qwen3MoEMLP(
                 config.hidden_size,
-                config.intermediate_size,
                 config.moe_intermediate_size,
                 config.num_experts,
                 config.num_experts_per_tok,
@@ -197,3 +201,34 @@ class Qwen3MoEForCausalLM(RMSNormForCausalLM):
     def __init__(self, config) -> None:
         model = Qwen3MoEModel(config)
         super().__init__(model, config)
+
+    def load_hf_experts(self, state_dict: dict) -> int:
+        """Aggregate HF per-expert weights into the fused expert tensors.
+
+        HF stores experts as mlp.experts.{i}.{gate_proj,up_proj,down_proj}.weight,
+        which load_weights_parallel cannot match to the fused parameters.
+        Called by the engine right after load_weights_parallel.
+
+        Returns the number of expert weight tensors loaded.
+        """
+        loaded = 0
+        for layer_idx, layer in enumerate(self.model.layers):
+            mlp = layer.mlp
+            if not isinstance(mlp, Qwen3MoEMLP):
+                continue
+            prefix = f"model.layers.{layer_idx}.mlp.experts"
+            for proj, attr in (
+                ("gate_proj", "expert_gate"),
+                ("up_proj", "expert_up"),
+                ("down_proj", "expert_down"),
+            ):
+                fused = getattr(mlp, attr)
+                for i in range(mlp.num_experts):
+                    weight = state_dict.get(f"{prefix}.{i}.{proj}.weight")
+                    if weight is None or weight.shape != fused.shape[1:]:
+                        continue
+                    fused.data[i].copy_(
+                        weight.to(dtype=fused.dtype, device=fused.device)
+                    )
+                    loaded += 1
+        return loaded

@@ -103,7 +103,7 @@ def run_server(args: ServerArgs) -> None:
     setup_logger(level=getattr(__import__("logging"), log_level))
 
     model_args = ModelArgs.from_pretrained(args.model_path)
-    tokenizer = TokenizerWorker(args.model_path)
+    tokenizer = TokenizerWorker(args.model_path, trust_remote_code=args.trust_remote_code)
 
     engine = Engine(args, model_args, tp_rank=0)
     scheduler = Scheduler(args, engine)
