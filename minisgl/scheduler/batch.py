@@ -22,7 +22,6 @@ class Req:
     """A single inference request tracked by the scheduler."""
 
     input_ids: list[int] = field(default_factory=list)
-    table_idx: int = 0
     cached_len: int = 0
     output_len: int = 0
     uid: int = 0
@@ -63,6 +62,9 @@ class Batch:
     block_table: torch.Tensor | None = None  # (num_reqs, max_blocks) page indices
     cache_seqlens: torch.Tensor | None = None  # (num_reqs,) total lens incl. current
     prefix_lens: torch.Tensor | None = None  # (num_reqs,) cached prefix lengths
+    # (num_reqs,) index of each request's last uncached token in the flat
+    # prefill batch — prefill only runs lm_head on these positions.
+    logits_indices: torch.Tensor | None = None
     # Max sequence length of the batch as a Python int (prefill: max uncached
     # len; decode: max total len). Lets attention backends avoid .item()
     # host syncs, which are also illegal during CUDA graph capture.

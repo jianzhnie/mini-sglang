@@ -1,6 +1,6 @@
 """Configuration dataclasses for mini-sglang."""
 
-__all__ = ["CacheArgs", "ModelArgs", "SamplingParams", "ServerArgs"]
+__all__ = ["ModelArgs", "SamplingParams", "ServerArgs"]
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,26 +45,6 @@ class ServerArgs:
             from minisgl.utils.device import set_device
 
             set_device(torch.device(self.device))
-
-
-@dataclass
-class CacheArgs:
-    """KV cache configuration derived from ServerArgs and GPU memory."""
-
-    page_size: int = 16
-    num_pages: int = 0
-    max_seq_len: int = 8192
-    memory_ratio: float = 0.9
-    dtype: str = "auto"
-
-    @classmethod
-    def from_server_args(cls, args: ServerArgs) -> "CacheArgs":
-        return cls(
-            page_size=args.page_size,
-            max_seq_len=args.max_seq_len,
-            memory_ratio=args.memory_ratio,
-            dtype=args.dtype,
-        )
 
 
 @dataclass

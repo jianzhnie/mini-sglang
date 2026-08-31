@@ -22,7 +22,7 @@ class ColumnParallelLinear(nn.Module):
         in_features: int,
         out_features: int,
         bias: bool = False,
-        gather_output: bool = True,
+        gather_output: bool = False,
     ) -> None:
         super().__init__()
         tp_size = get_tp_size()
@@ -34,6 +34,8 @@ class ColumnParallelLinear(nn.Module):
         self._init_weights()
         if bias:
             self.bias = nn.Parameter(torch.empty(self.out_features_per_rank))
+            # Bias is 1-D along the output dim: shard it like the weight.
+            self.bias.is_column_parallel = True
         else:
             self.register_parameter("bias", None)
 

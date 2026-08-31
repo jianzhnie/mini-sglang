@@ -66,13 +66,28 @@ class DecodeManager:
         num_reqs = len(running)
         batch = Batch(reqs=running, phase="decode")
 
-        self._block_table_buf[:num_reqs].fill_(-1)
-        self._req_to_token_buf[:num_reqs].fill_(-1)
+        # Max total length this step (Python int — attention backends use it
+        # to size gathers without a host sync).
+        max_seqlen = max(len(req.input_ids) for req in running)
 
-        max_seqlen = 0
+        # Clear only the columns the backend can read this step (with one
+        # page of margin) instead of the full-width tables: backends never
+        # touch req_to_token[:, max_seqlen:] or block_table columns beyond
+        # ceil(max_seqlen / page_size).
+        token_cols = min(
+            self.max_seq_len,
+            (max_seqlen + self.page_size - 1) // self.page_size * self.page_size
+            + self.page_size,
+        )
+        block_cols = min(
+            self._max_blocks,
+            (max_seqlen + self.page_size - 1) // self.page_size + 1,
+        )
+        self._block_table_buf[:num_reqs, :block_cols].fill_(-1)
+        self._req_to_token_buf[:num_reqs, :token_cols].fill_(-1)
+
         for i, req in enumerate(running):
             total_len = len(req.input_ids)
-            max_seqlen = max(max_seqlen, total_len)
             self._input_ids_buf[i, 0] = req.input_ids[-1]
             self._positions_buf[i, 0] = total_len - 1
             # cache_seqlens semantics: total length INCLUDING the current

@@ -8,6 +8,7 @@ import torch
 from safetensors.torch import load_file as safe_load
 
 from minisgl.utils.device import get_device
+from minisgl.utils.logger import logger
 
 
 def _iter_hf_files(model_path: str) -> Iterator[tuple[str, str]]:
@@ -52,6 +53,11 @@ def shard_tensor(
     world_size: int,
 ) -> torch.Tensor:
     """Shard a tensor along the given dimension."""
+    if tensor.shape[dim] % world_size != 0:
+        raise ValueError(
+            f"Cannot shard tensor of shape {tuple(tensor.shape)} along dim {dim} "
+            f"across {world_size} ranks: not divisible"
+        )
     chunk_size = tensor.shape[dim] // world_size
     start = rank * chunk_size
     return tensor.narrow(dim, start, chunk_size).contiguous()
@@ -63,7 +69,7 @@ def load_weights_parallel(
     tp_rank: int = 0,
     tp_size: int = 1,
     remap_fn=None,
-) -> None:
+) -> int:
     """Load weights into a model, handling tensor parallelism sharding.
 
     Args:
@@ -78,10 +84,16 @@ def load_weights_parallel(
     - RowParallel: weight is sharded along dim 1 (input dim)
     - Embedding: weight sharded along dim 0 (vocab dim)
     - Non-parallel: each rank gets full copy
+
+    Returns the number of parameters loaded. Params missing from the state
+    dict or skipped due to shape mismatch are reported via logger.warning.
     """
     device = get_device()
 
     loaded = 0
+    missing: list[str] = []
+    truncated: list[str] = []
+    skipped: list[str] = []
     for name, param in model.named_parameters():
         hf_name = remap_fn(name) if remap_fn else name
         if hf_name not in state_dict:
@@ -89,24 +101,26 @@ def load_weights_parallel(
             if name in state_dict:
                 hf_name = name
             else:
+                missing.append(name)
                 continue
 
         weight = state_dict[hf_name]
 
-        # Handle ColumnParallelLinear weights
-        if hasattr(param, "is_column_parallel") and param.is_column_parallel:
+        # Handle ColumnParallelLinear weights (and 1-D biases, dim 0 too)
+        if getattr(param, "is_column_parallel", False):
             weight = shard_tensor(weight, dim=0, rank=tp_rank, world_size=tp_size)
         # Handle RowParallelLinear weights
-        elif hasattr(param, "is_row_parallel") and param.is_row_parallel:
+        elif getattr(param, "is_row_parallel", False):
             weight = shard_tensor(weight, dim=1, rank=tp_rank, world_size=tp_size)
         # Handle VocabParallelEmbedding
-        elif hasattr(param, "is_vocab_parallel") and param.is_vocab_parallel:
+        elif getattr(param, "is_vocab_parallel", False):
             weight = shard_tensor(weight, dim=0, rank=tp_rank, world_size=tp_size)
         # Handle shape mismatch (e.g., embed_positions truncation)
         elif param.shape != weight.shape and param.dim() >= 2:
             weight = (
                 weight[: param.shape[0]] if weight.shape[0] > param.shape[0] else weight
             )
+            truncated.append(name)
 
         if param.shape == weight.shape:
             param.data.copy_(weight.to(device=device, dtype=param.dtype))
@@ -115,6 +129,24 @@ def load_weights_parallel(
             param.data.copy_(
                 weight[: param.shape[0]].to(device=device, dtype=param.dtype),
             )
+            truncated.append(name)
             loaded += 1
+        else:
+            skipped.append(name)
+
+    if missing:
+        logger.warning(
+            "%d params not found in state_dict (kept random init): %s",
+            len(missing),
+            missing,
+        )
+    if truncated:
+        logger.warning(
+            "%d params loaded with truncation: %s", len(truncated), truncated
+        )
+    if skipped:
+        logger.warning(
+            "%d params skipped due to shape mismatch: %s", len(skipped), skipped
+        )
 
     return loaded

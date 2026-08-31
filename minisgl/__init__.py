@@ -84,8 +84,18 @@ def parse_args() -> ServerArgs:
         action="store_true",
         help="Interactive CLI shell mode",
     )
-    parser.add_argument("--log-level", type=str, default="INFO")
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+    )
     parsed = parser.parse_args()
+    if parsed.tp_size > 1:
+        parser.error(
+            "tp_size > 1 is not supported yet: multi-process TP launch "
+            "has not been implemented"
+        )
     log_level = parsed.log_level
     delattr(parsed, "log_level")
     args = ServerArgs(**vars(parsed))
@@ -103,7 +113,9 @@ def run_server(args: ServerArgs) -> None:
     setup_logger(level=getattr(__import__("logging"), log_level))
 
     model_args = ModelArgs.from_pretrained(args.model_path)
-    tokenizer = TokenizerWorker(args.model_path, trust_remote_code=args.trust_remote_code)
+    tokenizer = TokenizerWorker(
+        args.model_path, trust_remote_code=args.trust_remote_code
+    )
 
     engine = Engine(args, model_args, tp_rank=0)
     scheduler = Scheduler(args, engine)

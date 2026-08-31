@@ -4,7 +4,7 @@
   <img src="docs/images/mini-sglang.png" alt="Mini-SGLang overview">
 </p>
 
-**Mini-SGLang** 是 [SGLang](https://github.com/sgl-project/sglang) 的轻量级教学实现，用 ~4,000 行 Python 完整复刻了一个高性能 LLM 推理框架的核心机制。项目拆解了现代 LLM 服务系统的每一个关键环节，让开发者能够逐行理解推理引擎的内部工作原理。
+**Mini-SGLang** 是 [SGLang](https://github.com/sgl-project/sglang) 的轻量级教学实现，用 ~5,000 行 Python 完整复刻了一个高性能 LLM 推理框架的核心机制。项目拆解了现代 LLM 服务系统的每一个关键环节，让开发者能够逐行理解推理引擎的内部工作原理。
 
 ## 核心特性
 
@@ -12,9 +12,9 @@
 - **PagedAttention** — 页式 KV Cache 管理，消除显存碎片
 - **RadixCache** — 基于 Radix Tree 的前缀感知缓存，自动复用公共前缀
 - **CUDA / NPU Graph** — Decode 阶段 kernel launch overhead 优化（支持 NVIDIA CUDA 和华为 Ascend NPU）
-- **Tensor Parallelism** — Column / Row Parallel Linear + NCCL/HCCL 多卡扩展
+- **Tensor Parallelism** — Column / Row Parallel Linear 层逻辑已就绪；多进程 TP 启动尚未实现（`--tp-size > 1` 会直接报错退出）
 - **多设备支持** — NVIDIA CUDA / 华为 Ascend NPU / CPU，自动检测优先级
-- **可插拔 Attention 后端** — FlashAttention (`fa`) / FlashInfer (`fi`) / PyTorch SDPA (`pt`)
+- **可插拔 Attention 后端** — FlashAttention (`fa`) / PyTorch SDPA (`pt`)；`fi`（FlashInfer）尚未实现，选择后转调 `fa`
 - **OpenAI 兼容 API** — `/v1/chat/completions` + `/v1/completions` + SSE 流式返回
 
 ## 架构概览
@@ -47,8 +47,9 @@ KV Cache Pool + RadixCache + CUDA/NPU Graphs
 
 ```
 minisgl/
-├── config.py           # 配置：ServerArgs, ModelArgs, CacheArgs, SamplingParams
+├── config.py           # 配置：ServerArgs, ModelArgs, SamplingParams
 ├── __init__.py          # CLI 入口（--shell / --port / --tp-size）
+├── __main__.py          # `python -m minisgl` 入口
 ├── engine/
 │   ├── engine.py        # 推理引擎：模型加载、forward、CUDA Graph
 │   ├── context.py       # BatchContext：批次张量管理
@@ -56,7 +57,7 @@ minisgl/
 │   ├── kvcache/
 │   │   ├── pool.py      # KV Cache 页式内存池
 │   │   ├── radix.py     # Radix Tree 前缀共享缓存
-│   │   └── naive.py     # LRU 简化缓存（无前缀共享）
+│   │   └── naive.py     # 简化缓存（无前缀共享、不保留页）
 │   └── distributed/
 │       └── pynccl.py    # NCCL 通信原语封装
 ├── models/
@@ -64,7 +65,7 @@ minisgl/
 │   ├── opt.py           # OPT 模型（LayerNorm + 可学习位置编码 + ReLU FFN）
 │   ├── qwen2.py         # Qwen2 模型（RMSNorm + Gated MLP + Q/K bias）
 │   ├── qwen3.py         # Qwen3 模型（+ QK LayerNorm + GQA）
-│   ├── qwen3_moe.py     # Qwen3-MoE 模型（MoE Router + FusedMoE）
+│   ├── qwen3_moe.py     # Qwen3-MoE 模型（MoE Router + 融合 expert 权重，对齐 HF 路由语义）
 │   ├── llama.py         # Llama 模型（经典架构）
 │   ├── mistral.py       # Mistral 模型（+ Sliding Window Attention）
 │   ├── registry.py      # 模型注册与自动检测
@@ -75,9 +76,7 @@ minisgl/
 │   │   ├── linear.py    # Column / Row Parallel Linear
 │   │   └── embedding.py # Vocab Parallel Embedding
 │   ├── attention/
-│   │   └── backend.py   # FlashAttention / FlashInfer / PyTorch 后端
-│   ├── moe/
-│   │   └── fused_moe.py # FusedMoE Triton kernel + PyTorch 实现
+│   │   └── backend.py   # FlashAttention / PyTorch 后端（FlashInfer 为转调 FA 的占位）
 │   └── tokenizer/
 │       └── worker.py    # HF Tokenizer Worker
 ├── scheduler/
@@ -129,12 +128,12 @@ python -m minisgl --model-path Qwen/Qwen2.5-0.5B --port 8000
 # 华为 Ascend NPU
 python -m minisgl --model-path Qwen/Qwen3-0.6B --device npu --attention-backend pt
 
-# 多 GPU Tensor Parallel
-python -m minisgl --model-path Qwen/Qwen2.5-7B-Instruct --tp-size 4
-
 # 交互式 Shell
 python -m minisgl --model-path Qwen/Qwen3-0.6B --shell
 ```
+
+> 注：`--tp-size > 1` 暂不支持——多进程 TP 启动尚未实现（TP 层的 Column/Row
+> Parallel 逻辑已就绪），传入会直接报错退出。
 
 ### 命令行参数
 
@@ -143,14 +142,17 @@ python -m minisgl --model-path Qwen/Qwen3-0.6B --shell
 | `--model-path` | (必填) | HuggingFace 模型路径 |
 | `--host` | `127.0.0.1` | API 监听地址 |
 | `--port` | `8000` | API 端口 |
-| `--tp-size` | `1` | Tensor Parallelism 卡数 |
+| `--tp-size` | `1` | Tensor Parallelism 卡数；`>1` 会报错退出（多进程 TP 启动未实现） |
 | `--device` | `auto` | 设备类型：`auto` / `cuda` / `npu` / `cpu` |
 | `--memory-ratio` | `0.9` | KV Cache 可用显存比例 |
 | `--max-running-req` | `256` | 最大并发请求数 |
 | `--max-seq-len` | `8192` | 最大序列长度 |
 | `--page-size` | `16` | KV Cache 页大小（tokens） |
-| `--attention-backend` | `fa` | 注意力后端：`fa` / `fi` / `fa,fi` / `pt` |
-| `--dtype` | `auto` | 模型精度：`auto` / `float16` / `bfloat16` |
+| `--cuda-graph-bs` | `None` | Graph 捕获的最大 batch size（CUDA/NPU） |
+| `--attention-backend` | `fa` | 注意力后端：`fa` / `fi`（未实现，转调 `fa`）/ `fa,fi` / `pt` |
+| `--dtype` | `auto` | 模型精度：`auto`（读 config.json）/ `float16` / `bfloat16` / `float32`（CPU 强制 float32） |
+| `--trust-remote-code` | `False` | 信任 HF 模型的自定义代码 |
+| `--log-level` | `INFO` | 日志级别：`DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `--shell` | `False` | 交互式 CLI 模式 |
 
 ### Python API
@@ -299,17 +301,17 @@ python examples/npu_inference.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5-1.5B Q
 | **OPT** | LayerNorm + 可学习位置编码 + ReLU FFN | OPT-125M | OPT-125M |
 | **Qwen2** | RMSNorm + RoPE + Gated MLP (SwiGLU) + Q/K bias | Qwen2.5-0.5B | Qwen2.5-{0.5B, 1.5B, 3B} |
 | **Qwen3** | Qwen2 + QK LayerNorm + GQA | Qwen3-0.6B | Qwen3-{0.6B, 1.7B, 4B} |
-| **Qwen3-MoE** | Qwen3 + MoE Router + FusedMoE | (单元测试) | (单元测试) |
+| **Qwen3-MoE** | Qwen3 + MoE Router（softmax → top-k → 归一，对齐 HF） | (单元测试) | (单元测试) |
 | **Llama** | 经典架构 + tie_word_embeddings | (单元测试) | (单元测试) |
 | **Mistral** | Llama + Sliding Window Attention | (单元测试) | (单元测试) |
 
 ## 运行测试
 
 ```bash
-# 单元测试（66 个测试，CPU 即可，~30s）
+# 单元测试（101 个测试，CPU 即可，~30s）
 python tests/test_cpu_core.py
 
-# 多模型集成测试（跨 OPT / Qwen2 / Qwen3 三种架构）
+# 示例冒烟测试（cpu_demo 无需模型；模型用例通过 MINISGL_TEST_MODELS 传入本地模型路径，未设置则跳过）
 python tests/test_examples.py
 
 # NPU 环境测试（需要 Docker + Ascend 硬件）
@@ -321,7 +323,7 @@ docker run --privileged -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
 ### 测试覆盖
 
 - **模型层**: RMSNorm, RoPE, Linear, Embedding, Attention Backend, 各模型 forward pass
-- **缓存**: KVCachePool alloc/free, RadixCache prefix/evict/remove, NaiveCacheManager LRU
+- **缓存**: KVCachePool alloc/free, RadixCache prefix/evict/remove, NaiveCacheManager
 - **调度**: PrefillManager, DecodeManager, BatchContext, Req 生命周期
 - **采样**: Greedy, Top-K, Top-P, Temperature, 边界情况
 - **设备**: NPU 检测, 设备切换, 内存查询, 分布式后端选择

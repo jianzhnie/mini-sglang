@@ -19,25 +19,24 @@
 
 ## 整体架构
 
-Mini-SGLang 采用**多进程 + 消息传递**架构，核心由以下进程组成：
+Mini-SGLang 采用**单进程**架构（教学简化：不做 SGLang 的多进程 ZMQ 拆分），核心组件：
 
 ```
 Client (HTTP/SSE)
     │
     ▼
-Frontend (FastAPI) ──ZMQ── Tokenizer (HF tokenizer worker)
-    │                           │
-    │ TokenizeMsg               │ DetokenizeMsg
-    ▼                           ▼
-Scheduler (Python) ──TCP/broadcast── Scheduler (其他 TP ranks)
+Frontend (FastAPI) ── TokenizerWorker (HF tokenizer，进程内调用)
+    │
+    ▼
+Scheduler (后台线程，单实例)
     │
     ▼
 Engine (CUDA Stream) — 模型 forward + 采样
 ```
 
 - **Frontend**: FastAPI HTTP 服务，接收 `/v1/chat/completions` 和 `/v1/completions` 请求，分配 UID，将文本 tokenize 后发给 Scheduler，并将结果以 SSE 流式返回客户端
-- **Tokenizer**: 独立进程，调用 HuggingFace tokenizer 进行 encode/decode，通过 ZMQ 与 Frontend 和 Scheduler 通信
-- **Scheduler**: 每个 TP rank 一个 Scheduler 实例，rank0 的 Scheduler 负责调度决策（prefill/decode 批处理），并通过 TCP（gloo backend）广播到所有 rank
+- **Tokenizer**: 进程内 `TokenizerWorker`，调用 HuggingFace tokenizer 进行 encode/decode（流式返回时使用增量 detokenize）
+- **Scheduler**: 单实例，负责调度决策（prefill/decode 批处理）。TP>1 的多进程启动（每 rank 一个 Scheduler + TCP 广播）尚未实现，CLI 会拒绝 `--tp-size > 1`
 - **Engine**: 持有模型权重、KV Cache、Attention Backend，执行实际的 forward 计算和采样
 
 ---
@@ -46,7 +45,7 @@ Engine (CUDA Stream) — 模型 forward + 采样
 
 ```bash
 minisgl/engine：  实现 执行引擎，KV 缓存管理， 分布式通信 模块
-minisgl/models：  实现 模型架构，MoE 后端， 神经网络层， 注意力后端， 分词/解码 worker
+minisgl/models：  实现 模型架构，神经网络层，注意力后端，分词/解码 worker
 minisgl/scheduler：调度核心， Prefill & Decode
 minisgl/sampling: 实现 采样策略
 minisgl/server:   API 服务 + 启动
@@ -61,37 +60,35 @@ minisgl/config.py: 参数配置模块
 
 ### 1. 接入与分词
 1. FastAPI 收到 POST 请求（JSON），FrontendManager 分配唯一的 `uid`
-2. 构造 `TokenizeMsg(uid, text)`，通过 ZMQ PUSH socket 发送到 Tokenizer 进程
-3. TokenizerWorker 调用 HF tokenizer 将文本转为 token IDs
+2. 进程内 TokenizerWorker 调用 HF tokenizer 将文本转为 token IDs
 
 ### 2. 调度
-4. Tokenizer 构造 `UserMsg(uid, input_ids, sampling_params)`，通过 ZMQ 发给 Scheduler Rank0
-5. Scheduler Rank0 通过 TCP（gloo broadcast）将请求信息广播到所有 TP Rank
-6. 每个 rank 的 PrefillManager 将请求加入 pending 队列
+3. FrontendManager 直接调用 `Scheduler.add_request(uid, input_ids, sampling_params)`
+4. PrefillManager 将请求加入 pending 队列
 
 ### 3. Prefill（预填充）
-7. PrefillManager 从 pending 队列取出请求，检查 KV Cache 可用空间、table 槽位、token budget
-8. 分配 KV Cache pages（优先通过 RadixCache 复用已有前缀）
-9. 将 prompt tokens 打包成 `Batch`（phase="prefill"），构造 `ForwardInput`：
+5. PrefillManager 从 pending 队列取出请求，检查 KV Cache 可用空间、token budget
+6. 分配 KV Cache pages（优先通过 RadixCache 复用已有前缀，命中部分走 extend attention）
+7. 将 prompt tokens 打包成 `Batch`（phase="prefill"），由 BatchContext 填充：
    - `input_ids`: token 索引
    - `positions`: 位置编码
    - `write_loc`: KV Cache 写入位置（page table 索引）
-10. Engine 执行一次完整 forward：**所有 prompt tokens 并行处理**
-11. 生成第一个 output token，将 KV Cache 状态写入 cache pool
-12. 请求从 PrefillManager 移入 DecodeManager（状态：pending → running）
+8. Engine 执行一次完整 forward：**所有 prompt tokens 并行处理**（lm_head 只算每个请求最后一个位置）
+9. 生成第一个 output token，并立即检查终止条件（EOS / max_tokens / max_seq_len）
+10. 请求移入 running 列表（状态：pending → running）
 
 ### 4. Decode（逐 token 生成）
-13. DecodeManager 将所有 running 请求打包成 `Batch`（phase="decode"）
-14. 每个 decode step，Engine 仅处理**一个**新 token（利用已缓存的 KV）
-15. 通过 **CUDA Graph** 回放加速 decode（消除 kernel launch overhead）
-16. Sampler 对 logits 做 top-p / top-k / temperature 采样得到下一个 token
-17. 新 token 追加到请求的 input_ids，更新 page table
+11. DecodeManager 将所有 running 请求打包成 `Batch`（phase="decode"）
+12. 每个 decode step，Engine 仅处理**一个**新 token（利用已缓存的 KV）
+13. 通过 **CUDA Graph** 回放加速 decode（消除 kernel launch overhead）
+14. Sampler 对 logits 做 top-p / top-k / temperature 采样得到下一个 token
+15. 新 token 追加到请求的 input_ids，更新 page table
 
 ### 5. 拆词与返回
-18. Scheduler Rank0 将生成的 token 封装为 `DetokenizeMsg(uid, token_id, finished)` 发给 DetokenizerWorker
-19. Detokenizer 将 token 解码为文本，通过 ZMQ 发给 FrontendManager
-20. FrontendManager 以 **SSE (Server-Sent Events)** 格式流式返回给客户端
-21. 步骤 13-20 循环直到：遇到 EOS token 或达到 `max_tokens` 或客户端断开
+16. Scheduler 的 `step()` 返回 `(uid, token_id, finished, finish_reason)` 四元组给 FrontendManager
+17. FrontendManager 用增量 detokenize 将 token 解码为文本片段
+18. FrontendManager 以 **SSE (Server-Sent Events)** 格式流式返回给客户端（`stream=true` 时；默认 `stream=false` 单次返回）
+19. 步骤 11-18 循环直到：遇到 EOS token 或达到 `max_tokens` 或客户端断开（断开会触发 `Scheduler.abort_request`）
 
 ---
 
@@ -99,15 +96,15 @@ minisgl/config.py: 参数配置模块
 
 ### Req（请求）
 ```python
-@dataclass
+@dataclass(slots=True)
 class Req:
-    input_ids: Tensor          # CPU tensor，累积的 token 序列
-    table_idx: int             # 请求在 page table 中的行索引
+    input_ids: list[int]       # 累积的 token 序列（prompt + 已生成）
     cached_len: int            # 已缓存 KV 的 token 数（前缀匹配后）
-    output_len: int            # 还需生成的 token 数
+    output_len: int            # 已生成的 token 数
     uid: int                   # 全局唯一请求 ID
     sampling_params: SamplingParams
-    cache_handle: BaseCacheHandle  # 指向分配的 KV Cache 块
+    cache_handle: BaseCacheHandle  # 指向分配的 KV Cache 页（含共享前缀页）
+    status: SequenceStatus     # WAITING / RUNNING / FINISHED
 ```
 
 ### Batch（批次）
@@ -136,23 +133,22 @@ class SamplingParams:
 ## 关键架构决策
 
 ### Attention 后端（可插拔）
-- **FlashInfer** (`fi`): 推荐，支持 Prefill/Decode 分离优化
 - **FlashAttention** (`fa`): 通用后端，兼容性好
-- 支持 **Hybrid Backend**: Prefill 和 Decode 使用不同的后端（如 `fa,fi`），最大化各自场景的吞吐
+- **PyTorch SDPA** (`pt`): 纯 PyTorch 参考实现（CPU/NPU 也用它），支持 sliding window 与 extend attention
+- **FlashInfer** (`fi`): 尚未实现——选择后转调 `fa`；`fa,fi`（hybrid）目前同样全部走 `fa`
 
 ### KV Cache 管理
-- **PagedAttention**: 将 KV Cache 划分为固定大小的 page（默认 16/32/64 tokens）
-- **RadixCache**: 基于 Radix Tree 的前缀感知缓存管理器，自动检测和复用公共前缀
-- **NaiveCache**: 简化版 LRU 缓存，用于无前缀共享场景
-- Page Table 是一个 `(max_running_req + 1, max_seq_len)` 的 int32 tensor，存储每个 token 位置对应的 KV Cache page 索引
+- **PagedAttention**: 将 KV Cache 划分为固定大小的 page（默认 16 tokens）
+- **RadixCache**: 基于 Radix Tree 的前缀感知缓存管理器，自动检测和复用公共前缀；页所有权归树，请求结束只摘引用，页由 evict() 按需回收
+- **NaiveCache**: 简化缓存，不做前缀共享、不保留页，用于对照
+- Page Table（`req_to_token`）是 `(num_reqs, max_seq_len)` 的 int32 tensor，存储每个 token 位置对应的 KV Cache 槽位索引
 
 ### 分布式策略
-- **Tensor Parallelism (TP)**: 将权重矩阵按列/行切分到多个 GPU
-  - `ColumnParallelLinear`: 沿 hidden_dim 切分（gather output）
+- **Tensor Parallelism (TP)**: 将权重矩阵按列/行切分到多个 GPU（层逻辑已实现；多进程启动尚未实现，CLI 拒绝 `--tp-size > 1`）
+  - `ColumnParallelLinear`: 沿 hidden_dim 切分（weight/bias 都分片；lm_head 显式 gather output）
   - `RowParallelLinear`: 沿 input_dim 切分（all-reduce output）
   - `VocabParallelEmbedding`: 沿 vocab_dim 切分
-- **PyNCCL**: 用 Python 封装的 NCCL 通信原语（all-reduce, all-gather, broadcast）
-- Scheduler Rank0 做决策后通过 TCP 广播，确保所有 rank 的 batch 顺序一致
+- **PyNCCL**: 用 Python 封装的 NCCL 通信原语（all-reduce, all-gather, broadcast）；非分布式时为 no-op
 
 ### CUDA Graph 优化
 - 对 decode 阶段的每种 batch size（1, 2, ..., max_cuda_graph_bs）预先捕获 CUDA Graph
@@ -182,7 +178,7 @@ class SamplingParams:
 | RoPE | 旋转位置编码，支持动态序列长度 |
 | GQA (Grouped Query Attention) | Q heads 数可以不同于 KV heads 数 |
 | Gated MLP (SwiGLU) | gate_proj + up_proj + down_proj 三矩阵 |
-| MoE (Mixture of Experts) | Top-k routing + Fused Triton kernel |
+| MoE (Mixture of Experts) | 融合 expert 权重张量 + HF 对齐路由（softmax → top-k → 归一），纯 PyTorch 实现 |
 | QK LayerNorm | Qwen3 特有的 attention Q/K normalization |
 | Tensor Parallel | Column/Row parallel linear, Vocab parallel embedding |
 | Tie Word Embeddings | lm_head 与 embed_tokens 共享权重 |
@@ -208,8 +204,8 @@ class SamplingParams:
 兼容 OpenAI Completions API（文本补全模式）。
 
 ### 响应格式
-- `stream=true`（默认）：SSE 流式返回 `data: {"choices": [{"delta": {"content": "..."}}]}`
-- `stream=false`：单次 JSON 响应
+- `stream=false`（默认）：单次 JSON 响应
+- `stream=true`：SSE 流式返回 `data: {"choices": [{"delta": {"content": "..."}}]}`
 
 
 ### 启动方式
@@ -217,12 +213,11 @@ class SamplingParams:
 # 启动服务（TP=1）
 python -m minisgl --model-path Qwen/Qwen2-0.5B-Instruct --port 8000
 
-# 多 GPU Tensor Parallel
-python -m minisgl --model-path Qwen/Qwen2-7B-Instruct --tp-size 4
-
 # 交互式 CLI shell
 python -m minisgl --model-path Qwen/Qwen2-0.5B-Instruct --shell
 ```
+
+> 注：`--tp-size > 1` 暂不支持（多进程 TP 启动未实现），传入会直接报错退出。
 
 ---
 

@@ -12,10 +12,12 @@ from minisgl.utils.device import get_tp_size, is_distributed
 
 
 def all_reduce(tensor: torch.Tensor, op: str = "sum") -> torch.Tensor:
-    """All-reduce across TP ranks."""
+    """All-reduce across TP ranks. Only 'sum' is supported."""
+    if op != "sum":
+        raise ValueError(f"Unsupported all_reduce op: {op!r} (only 'sum')")
     if not is_distributed():
         return tensor
-    dist.all_reduce(tensor, op=dist.ReduceOp.SUM if op == "sum" else dist.ReduceOp.AVG)
+    dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
     return tensor
 
 

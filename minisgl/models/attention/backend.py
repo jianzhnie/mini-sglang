@@ -173,10 +173,19 @@ class FlashAttentionBackend:
             and k_cache is not None
             and int(prefix_lens.max()) > 0
         ):
-            return FlashAttentionBackend._prefill_extend(
-                q_flat, k_cache, v_cache, cu_seqlens_q, prefix_lens, block_table,
-                window_size=window_size,
-            ).view(batch, seq_len, num_heads, head_dim).transpose(1, 2)
+            return (
+                FlashAttentionBackend._prefill_extend(
+                    q_flat,
+                    k_cache,
+                    v_cache,
+                    cu_seqlens_q,
+                    prefix_lens,
+                    block_table,
+                    window_size=window_size,
+                )
+                .view(batch, seq_len, num_heads, head_dim)
+                .transpose(1, 2)
+            )
 
         # Prefer the scheduler-computed max sequence length (a plain Python
         # int, no host sync); fall back to deriving it from cu_seqlens for
@@ -462,9 +471,7 @@ class PyTorchBackend:
                 allow = (pos.unsqueeze(0) <= pos.unsqueeze(1)) & (
                     pos.unsqueeze(0) > pos.unsqueeze(1) - sliding_window
                 )
-                attn_mask = torch.zeros(
-                    seq_i, seq_i, dtype=q.dtype, device=q.device
-                )
+                attn_mask = torch.zeros(seq_i, seq_i, dtype=q.dtype, device=q.device)
                 attn_mask.masked_fill_(~allow, float("-inf"))
                 is_causal = False
             out_i = F.scaled_dot_product_attention(
@@ -501,13 +508,8 @@ class PyTorchBackend:
             raise RuntimeError(msg)
 
         num_kv_heads = k_cache.shape[2]
-
-        if num_heads != num_kv_heads:
-            k_cache = k_cache.repeat_interleave(num_heads // num_kv_heads, dim=2)
-            v_cache = v_cache.repeat_interleave(num_heads // num_kv_heads, dim=2)
-
-        flat_k = k_cache.reshape(-1, num_heads, head_dim)
-        flat_v = v_cache.reshape(-1, num_heads, head_dim)
+        flat_k = k_cache.reshape(-1, num_kv_heads, head_dim)
+        flat_v = v_cache.reshape(-1, num_kv_heads, head_dim)
 
         # cache_seqlens are total lengths INCLUDING the current token.
         # Prefer the scheduler-computed max (a plain Python int): it avoids a
@@ -528,8 +530,14 @@ class PyTorchBackend:
 
         idxs_safe = idxs.clamp(min=0).long()
 
-        gathered_k = flat_k[idxs_safe]
+        # Gather KV-head rows first, then expand GQA groups on the small
+        # gathered tensors — repeat_interleave on the whole cache pool would
+        # be an O(pool_size) allocation per layer per step.
+        gathered_k = flat_k[idxs_safe]  # (num_reqs, max_len, num_kv_heads, head_dim)
         gathered_v = flat_v[idxs_safe]
+        if num_heads != num_kv_heads:
+            gathered_k = gathered_k.repeat_interleave(num_heads // num_kv_heads, dim=2)
+            gathered_v = gathered_v.repeat_interleave(num_heads // num_kv_heads, dim=2)
 
         gathered_k = gathered_k.transpose(1, 2)
         gathered_v = gathered_v.transpose(1, 2)

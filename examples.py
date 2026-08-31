@@ -57,7 +57,7 @@ def run_demo() -> None:
 
         generated: list[int] = []
         while not scheduler.is_idle():
-            for _uid, token_id, finished in scheduler.step():
+            for _uid, token_id, finished, _reason in scheduler.step():
                 generated.append(token_id)
                 if finished:
                     break

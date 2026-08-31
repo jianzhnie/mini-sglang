@@ -62,9 +62,7 @@ class PrefillManager:
                     break
 
                 # Try prefix matching (may reduce pages needed via cache sharing)
-                matched_len, shared_pages = self.radix_cache.match_prefix(
-                    req.input_ids
-                )
+                matched_len, shared_pages = self.radix_cache.match_prefix(req.input_ids)
                 req.cached_len = matched_len
 
                 new_pages = self._pages_needed(req, matched_len)
@@ -96,7 +94,6 @@ class PrefillManager:
                 handle.num_shared = len(shared_pages)
                 handle.cached_len = matched_len
                 req.cache_handle = handle
-                req.table_idx = len(scheduled)
 
                 # Insert into radix cache (teaching simplification: the KV is
                 # attached to the tree before it is actually computed).
@@ -120,10 +117,6 @@ class PrefillManager:
             self.max_seq_len,
         )
         return (upper - matched_len + self.page_size - 1) // self.page_size
-
-    def remove_finished(self, req: Req) -> None:
-        with self._lock:
-            self._remove_finished_nolock(req)
 
     def _remove_finished_nolock(self, req: Req) -> None:
         with contextlib.suppress(ValueError):

@@ -68,6 +68,18 @@ class TestLinearLayers(unittest.TestCase):
         y = layer(x)
         self.assertEqual(y.shape, (2, 10, 128))
 
+    def test_column_parallel_defaults(self):
+        from minisgl.models.layers.linear import ColumnParallelLinear
+
+        layer = ColumnParallelLinear(64, 128, bias=True)
+        # Default: no all-gather (hidden-dim shards stay sharded under TP)
+        self.assertFalse(layer.gather_output)
+        # lm_head opts into gathering for full-vocab logits
+        lm_head = ColumnParallelLinear(64, 128, bias=False, gather_output=True)
+        self.assertTrue(lm_head.gather_output)
+        # 1-D bias is marked for column-parallel sharding like the weight
+        self.assertTrue(getattr(layer.bias, "is_column_parallel", False))
+
     def test_row_parallel_linear_tp1(self):
         from minisgl.models.layers.linear import RowParallelLinear
 
@@ -349,19 +361,108 @@ class TestDistributed(unittest.TestCase):
         y = all_reduce(x)
         self.assertTrue(torch.equal(x, y))  # no-op when not distributed
 
+    def test_all_reduce_invalid_op_raises(self):
+        from minisgl.engine.distributed.pynccl import all_reduce
+
+        with self.assertRaises(ValueError):
+            all_reduce(torch.randn(4), op="avg")
+
+
+# ── Test Weight Loading ──
+class TestWeightLoading(unittest.TestCase):
+    def test_shard_tensor_not_divisible_raises(self):
+        from minisgl.utils.weights import shard_tensor
+
+        x = torch.randn(7, 4)
+        with self.assertRaises(ValueError):
+            shard_tensor(x, dim=0, rank=0, world_size=2)
+
+    def test_shard_tensor_1d(self):
+        from minisgl.utils.weights import shard_tensor
+
+        x = torch.arange(8)
+        shard = shard_tensor(x, dim=0, rank=1, world_size=2)
+        self.assertEqual(shard.tolist(), [4, 5, 6, 7])
+
+    def test_missing_params_warn(self):
+        from minisgl.utils.weights import load_weights_parallel
+
+        model = nn.Linear(4, 4)
+        with self.assertLogs("minisgl", level="WARNING") as cm:
+            loaded = load_weights_parallel(model, {})
+        self.assertEqual(loaded, 0)
+        self.assertTrue(any("not found" in m for m in cm.output))
+
+    def test_shape_mismatch_skipped_warns(self):
+        from minisgl.utils.weights import load_weights_parallel
+
+        model = nn.Linear(4, 4)
+        # bias has wrong shape (5 vs 4) and is 1-D: cannot be truncated
+        sd = {"weight": torch.randn(4, 4), "bias": torch.randn(5)}
+        with self.assertLogs("minisgl", level="WARNING") as cm:
+            loaded = load_weights_parallel(model, sd)
+        self.assertEqual(loaded, 1)
+        self.assertTrue(any("shape mismatch" in m for m in cm.output))
+
+    def test_column_parallel_bias_sharded(self):
+        from unittest import mock
+
+        from minisgl.models.layers.linear import ColumnParallelLinear
+        from minisgl.utils import device as device_mod
+        from minisgl.utils.weights import load_weights_parallel
+
+        # Build the layer as if on a TP=2 rank (dist not initialized, so no
+        # real communication happens).
+        with mock.patch.object(device_mod._state, "tp_size", 2):
+            layer = ColumnParallelLinear(4, 8, bias=True)
+        self.assertEqual(layer.bias.shape, (4,))
+
+        sd = {"weight": torch.randn(8, 4), "bias": torch.arange(8.0)}
+        loaded = load_weights_parallel(layer, sd, tp_rank=1, tp_size=2)
+        self.assertEqual(loaded, 2)
+        # Rank 1 gets the second half of the bias
+        self.assertEqual(layer.bias.tolist(), [4.0, 5.0, 6.0, 7.0])
+
+
+# ── Test dtype resolution ──
+class TestResolveDtype(unittest.TestCase):
+    def test_auto_reads_config_json(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from minisgl.engine.engine import _resolve_dtype
+
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "config.json").write_text(json.dumps({"torch_dtype": "bfloat16"}))
+            self.assertEqual(_resolve_dtype("auto", d, "cuda"), torch.bfloat16)
+            # CPU falls back to float32
+            self.assertEqual(_resolve_dtype("auto", d, "cpu"), torch.float32)
+
+    def test_explicit_and_fallbacks(self):
+        from minisgl.engine.engine import _resolve_dtype
+
+        self.assertEqual(
+            _resolve_dtype("float16", "/nonexistent", "cuda"), torch.float16
+        )
+        # Missing config.json under auto falls back to float32
+        self.assertEqual(_resolve_dtype("auto", "/nonexistent", "cuda"), torch.float32)
+        # CPU forces float32
+        self.assertEqual(
+            _resolve_dtype("float16", "/nonexistent", "cpu"), torch.float32
+        )
+        # Unknown dtype string falls back to float32
+        self.assertEqual(_resolve_dtype("weird", "/nonexistent", "cuda"), torch.float32)
+
 
 # ── Test Config ──
 class TestConfig(unittest.TestCase):
     def test_config_creation(self):
-        from minisgl.config import CacheArgs, SamplingParams, ServerArgs
+        from minisgl.config import SamplingParams, ServerArgs
 
         args = ServerArgs(model_path="/tmp/test", port=8000, tp_size=1)
         self.assertEqual(args.port, 8000)
         self.assertEqual(args.tp_size, 1)
-
-        cache = CacheArgs.from_server_args(args)
-        self.assertEqual(cache.page_size, 16)
-        self.assertEqual(cache.max_seq_len, 8192)
 
         params = SamplingParams(temperature=0.7, top_k=50, top_p=0.95)
         self.assertEqual(params.temperature, 0.7)
@@ -691,8 +792,8 @@ class TestQwen3MoEModel(unittest.TestCase):
                 state_dict[f"model.layers.0.mlp.experts.{i}.{proj}.weight"] = (
                     torch.full((3, 4), float(i + 1))
                 )
-            state_dict[f"model.layers.0.mlp.experts.{i}.down_proj.weight"] = (
-                torch.full((4, 3), float(i + 1))
+            state_dict[f"model.layers.0.mlp.experts.{i}.down_proj.weight"] = torch.full(
+                (4, 3), float(i + 1)
             )
 
         class _FakeLayer:
@@ -1023,7 +1124,9 @@ class TestRadixCacheEvictRemove(unittest.TestCase):
         radix.remove([1, 2, 3, 4, 7, 8], h2)
         evicted = radix.evict(10)
         # Pages: h1[0] (shared page 0), h1[1], h2[1] — each exactly once.
-        self.assertEqual(sorted(evicted), sorted({h1.page_ids[0], h1.page_ids[1], h2.page_ids[1]}))
+        self.assertEqual(
+            sorted(evicted), sorted({h1.page_ids[0], h1.page_ids[1], h2.page_ids[1]})
+        )
         self.assertEqual(pool.free_count(), 20)
 
     def test_evict_respects_refcount(self):
@@ -1244,13 +1347,21 @@ class TestSharedDecoder(unittest.TestCase):
 class TestEndToEndScheduler(unittest.TestCase):
     """Integration tests for the full Engine+Scheduler pipeline on CPU."""
 
-    def _make_engine_scheduler(self):
+    @staticmethod
+    def _make_engine_scheduler(
+        cache_strategy: str = "radix", seed: int | None = None, **server_overrides
+    ):
         import json
         import tempfile
 
         from minisgl.config import ModelArgs, ServerArgs
         from minisgl.engine.engine import Engine
         from minisgl.scheduler.scheduler import Scheduler
+
+        if seed is not None:
+            # Same seed -> identical random weights across instances, so two
+            # schedulers can be compared token-for-token under greedy decoding.
+            torch.manual_seed(seed)
 
         tmpdir = tempfile.mkdtemp()
         config = {
@@ -1271,24 +1382,37 @@ class TestEndToEndScheduler(unittest.TestCase):
             json.dump(config, f)
 
         model_args = ModelArgs.from_pretrained(tmpdir)
-        server_args = ServerArgs(
-            model_path=tmpdir,
-            tp_size=1,
-            attention_backend="pt",
-            max_running_req=4,
-            max_seq_len=64,
-            page_size=8,
-            memory_ratio=0.5,
-            cuda_graph_bs=0,
-        )
+        server_kwargs = {
+            "model_path": tmpdir,
+            "tp_size": 1,
+            "attention_backend": "pt",
+            "max_running_req": 4,
+            "max_seq_len": 64,
+            "page_size": 8,
+            "memory_ratio": 0.5,
+            "cuda_graph_bs": 0,
+        }
+        server_kwargs.update(server_overrides)
+        server_args = ServerArgs(**server_kwargs)
         engine = Engine(server_args, model_args, tp_rank=0)
         for param in engine.model.parameters():
             if param.dim() >= 2:
                 nn.init.normal_(param, std=0.02)
             elif param.dim() == 1:
                 nn.init.ones_(param)
-        scheduler = Scheduler(server_args, engine)
+        scheduler = Scheduler(server_args, engine, cache_strategy=cache_strategy)
         return scheduler
+
+    @staticmethod
+    def _run_to_completion(scheduler, max_steps: int = 200) -> dict:
+        """Step until idle; return {uid: [(token_id, finished, reason), ...]}."""
+        results: dict = {}
+        steps = 0
+        while not scheduler.is_idle() and steps < max_steps:
+            for uid, token_id, finished, reason in scheduler.step():
+                results.setdefault(uid, []).append((token_id, finished, reason))
+            steps += 1
+        return results
 
     def test_single_request_generation(self):
         from minisgl.config import SamplingParams
@@ -1298,7 +1422,7 @@ class TestEndToEndScheduler(unittest.TestCase):
         generated = []
         steps = 0
         while not scheduler.is_idle() and steps < 100:
-            for _uid, token_id, _finished in scheduler.step():
+            for _uid, token_id, _finished, _reason in scheduler.step():
                 generated.append(token_id)
             steps += 1
         self.assertGreater(len(generated), 0)
@@ -1317,7 +1441,7 @@ class TestEndToEndScheduler(unittest.TestCase):
         results = {uid1: [], uid2: []}
         steps = 0
         while not scheduler.is_idle() and steps < 100:
-            for uid, token_id, _finished in scheduler.step():
+            for uid, token_id, _finished, _reason in scheduler.step():
                 results[uid].append(token_id)
             steps += 1
         self.assertGreater(len(results[uid1]), 0)
@@ -1405,9 +1529,9 @@ class TestPyTorchBackendDecode(unittest.TestCase):
             req_to_token=req_to_token,
             forward_mode="prefill",
         )
-        ref = F.scaled_dot_product_attention(
-            q_full, k_full, v_full, is_causal=True
-        )[:, :, cached:, :]
+        ref = F.scaled_dot_product_attention(q_full, k_full, v_full, is_causal=True)[
+            :, :, cached:, :
+        ]
         self.assertEqual(out.shape, ref.shape)
         self.assertTrue(torch.allclose(out, ref, atol=1e-5))
 
@@ -1467,34 +1591,389 @@ class TestSamplerEdgeCases(unittest.TestCase):
 
 # ── Test FrontendManager ──
 class TestFrontendManager(unittest.TestCase):
+    @staticmethod
+    def _make_frontend(scheduler):
+        from minisgl.config import ServerArgs
+        from minisgl.server.frontend import FrontendManager
+
+        args = ServerArgs(model_path="/tmp/test")
+        return FrontendManager(args, scheduler, None)
+
+    class _MockScheduler:
+        def __init__(self):
+            self._uid = 0
+            self.results = []
+            self.aborted = []
+
+        def add_request(self, input_ids, sampling_params):
+            uid = self._uid
+            self._uid += 1
+            return uid
+
+        def is_idle(self):
+            return True
+
+        def step(self):
+            results, self.results = self.results, []
+            return results
+
+        def abort_request(self, uid):
+            self.aborted.append(uid)
+            return True
+
     def test_submit_and_get_queue(self):
         import queue
 
-        from minisgl.config import SamplingParams, ServerArgs
-        from minisgl.server.frontend import FrontendManager
+        from minisgl.config import SamplingParams
 
-        class MockScheduler:
-            _uid = 0
-
-            def add_request(self, input_ids, sampling_params):
-                uid = self._uid
-                self._uid += 1
-                return uid
-
-            def is_idle(self):
-                return True
-
-            def step(self):
-                return []
-
-        args = ServerArgs(model_path="/tmp/test")
-        fm = FrontendManager(args, MockScheduler(), None)
+        fm = self._make_frontend(self._MockScheduler())
         uid = fm.submit_request([1, 2, 3], SamplingParams())
         self.assertEqual(uid, 0)
         q = fm.get_result_queue(uid)
         self.assertIsInstance(q, queue.Queue)
         fm.remove_result(uid)
         self.assertIsNone(fm.get_result_queue(uid))
+
+    def test_process_step_distributes_results(self):
+        from minisgl.config import SamplingParams
+
+        scheduler = self._MockScheduler()
+        fm = self._make_frontend(scheduler)
+        uid = fm.submit_request([1, 2, 3], SamplingParams())
+
+        scheduler.results.append((uid, 42, True, "stop"))
+        fm.process_step()
+        self.assertEqual(fm.get_result_queue(uid).get_nowait(), (42, True, "stop"))
+
+    def test_process_step_ignores_unknown_uid(self):
+        scheduler = self._MockScheduler()
+        fm = self._make_frontend(scheduler)
+
+        # No queue registered for uid 999: must not raise (TOCTOU safety).
+        scheduler.results.append((999, 1, True, "stop"))
+        fm.process_step()
+
+    def test_stream_timeout_aborts_request(self):
+        import minisgl.server.frontend as frontend
+        from minisgl.config import SamplingParams
+
+        scheduler = self._MockScheduler()
+        fm = self._make_frontend(scheduler)
+
+        old_frontend, old_timeout = frontend._frontend, frontend.REQUEST_TIMEOUT
+        frontend._frontend, frontend.REQUEST_TIMEOUT = fm, 0.01
+        try:
+            uid = fm.submit_request([1, 2, 3], SamplingParams())
+            result_queue = fm.get_result_queue(uid)
+            chunks = list(frontend._stream_chat_response(uid, result_queue, "m"))
+        finally:
+            frontend._frontend, frontend.REQUEST_TIMEOUT = old_frontend, old_timeout
+
+        # Timed-out stream reports an error chunk instead of a silent [DONE],
+        # aborts the scheduler-side request, and cleans up the result queue.
+        self.assertTrue(any('"error"' in chunk for chunk in chunks))
+        self.assertEqual(scheduler.aborted, [uid])
+        self.assertIsNone(fm.get_result_queue(uid))
+
+
+# ── Test Incremental Detokenizer ──
+class TestIncrementalDetokenizer(unittest.TestCase):
+    def test_multibyte_char_split_across_tokens(self):
+        from minisgl.server.frontend import IncrementalDetokenizer
+
+        class MockTokenizer:
+            # Byte-level style: tokens 1/2 are the two halves of "中"; decoding
+            # a lone half yields the U+FFFD replacement character.
+            TABLE = {(): "", (1,): "\ufffd", (1, 2): "中", (1, 2, 3): "中文"}
+
+            def decode(self, ids, skip_special_tokens=True):
+                return self.TABLE[tuple(ids)]
+
+        detok = IncrementalDetokenizer(MockTokenizer())
+        pieces = [detok.add_token(t) for t in (1, 2, 3)]
+        self.assertEqual("".join(pieces), "中文")
+        self.assertNotIn("\ufffd", "".join(pieces))
+
+    def test_ascii_stream(self):
+        from minisgl.server.frontend import IncrementalDetokenizer
+
+        class MockTokenizer:
+            def decode(self, ids, skip_special_tokens=True):
+                return "".join(chr(i) for i in ids)
+
+        detok = IncrementalDetokenizer(MockTokenizer())
+        pieces = [detok.add_token(t) for t in (ord("h"), ord("i"))]
+        self.assertEqual(pieces, ["h", "i"])
+
+
+# ── Test Finish Reason and Abort ──
+class TestFinishReasonAndAbort(unittest.TestCase):
+    @staticmethod
+    def _make_scheduler():
+        return TestEndToEndScheduler._make_engine_scheduler()
+
+    def test_finish_reason_stop_and_length(self):
+        from minisgl.config import SamplingParams
+        from minisgl.scheduler.batch import Req
+
+        scheduler = self._make_scheduler()
+        # EOS token (2 in this fixture) ends with "stop".
+        req = Req(input_ids=[1, 2, 3], sampling_params=SamplingParams(max_tokens=10))
+        self.assertEqual(scheduler._finish_reason(req, 2), "stop")
+        self.assertIsNone(scheduler._finish_reason(req, 5))
+        # ignore_eos disables the "stop" reason.
+        req_ignore = Req(
+            input_ids=[1, 2, 3],
+            sampling_params=SamplingParams(max_tokens=10, ignore_eos=True),
+        )
+        self.assertIsNone(scheduler._finish_reason(req_ignore, 2))
+
+        # Hitting max_tokens ends with "length".
+        req_len = Req(input_ids=[1, 2, 3], sampling_params=SamplingParams(max_tokens=4))
+        req_len.output_len = 4
+        self.assertEqual(scheduler._finish_reason(req_len, 5), "length")
+
+        # Hitting max_seq_len (64 in this fixture) ends with "length".
+        req_seq = Req(
+            input_ids=[0] * 64, sampling_params=SamplingParams(max_tokens=100)
+        )
+        self.assertEqual(scheduler._finish_reason(req_seq, 5), "length")
+
+    def test_long_prompt_aborted(self):
+        from minisgl.config import SamplingParams
+
+        scheduler = self._make_scheduler()
+        # Prompt longer than max_seq_len (64) is aborted at add time.
+        uid = scheduler.add_request(list(range(100)), SamplingParams(max_tokens=4))
+        results = scheduler.step()
+        self.assertEqual(len(results), 1)
+        r_uid, _token_id, finished, reason = results[0]
+        self.assertEqual((r_uid, finished, reason), (uid, True, "abort"))
+        self.assertTrue(scheduler.is_idle())
+
+    def test_abort_pending_request(self):
+        from minisgl.config import SamplingParams
+
+        scheduler = self._make_scheduler()
+        uid = scheduler.add_request([1, 2, 3], SamplingParams(max_tokens=4))
+        self.assertEqual(len(scheduler.prefill_manager.pending), 1)
+
+        self.assertTrue(scheduler.abort_request(uid))
+        self.assertEqual(len(scheduler.prefill_manager.pending), 0)
+        self.assertTrue(scheduler.is_idle())
+        # Aborting an unknown UID is a no-op.
+        self.assertFalse(scheduler.abort_request(uid))
+
+    def test_abort_running_request_releases_resources(self):
+        from minisgl.config import SamplingParams
+
+        scheduler = self._make_scheduler()
+        uid = scheduler.add_request(
+            [1, 2, 3], SamplingParams(temperature=0.0, max_tokens=32, ignore_eos=True)
+        )
+        scheduler.step()  # prefill moves the request to running
+        self.assertEqual(len(scheduler.prefill_manager.running), 1)
+        req = scheduler.prefill_manager.running[0]
+        self.assertIsNotNone(req.cache_handle)
+
+        self.assertTrue(scheduler.abort_request(uid))
+        self.assertEqual(len(scheduler.prefill_manager.running), 0)
+        self.assertIsNone(req.cache_handle)  # cache handle released
+        self.assertEqual(req.status.name, "FINISHED")
+        self.assertTrue(scheduler.is_idle())
+        # No further results are produced for the aborted request.
+        self.assertEqual(scheduler.step(), [])
+
+
+# ── Test Radix Prefix Sharing End-to-End (Regression) ──
+class TestRadixPrefixSharingE2E(unittest.TestCase):
+    """Regression tests for the radix-cache rewrite (tree owns pages)."""
+
+    def test_shared_prefix_matches_naive_baseline(self):
+        # Guards the radix rewrite: two concurrent requests sharing >= 1 page
+        # of prefix must generate token-for-token the same output as with the
+        # naive (no-sharing) cache. Same seed -> identical weights, greedy
+        # decoding -> any divergence is a sharing bug.
+        from minisgl.config import SamplingParams
+
+        prefix = list(range(10, 18))  # exactly one page (page_size=8)
+        prompts = [prefix + [30, 31], prefix + [40, 41]]
+
+        def run(cache_strategy):
+            scheduler = TestEndToEndScheduler._make_engine_scheduler(
+                cache_strategy=cache_strategy, seed=0
+            )
+            uids = [
+                scheduler.add_request(p, SamplingParams(temperature=0.0, max_tokens=4))
+                for p in prompts
+            ]
+            # Keep a reference before stepping; finished requests leave the
+            # running list, but their Req objects retain cached_len.
+            reqs = list(scheduler.prefill_manager.pending)
+            results = TestEndToEndScheduler._run_to_completion(scheduler)
+            return reqs, uids, results
+
+        radix_reqs, radix_uids, radix_results = run("radix")
+        _naive_reqs, naive_uids, naive_results = run("naive")
+
+        # The second request must actually have reused the shared prefix.
+        self.assertGreaterEqual(radix_reqs[1].cached_len, 8)
+
+        for r_uid, n_uid in zip(radix_uids, naive_uids, strict=True):
+            radix_tokens = [t for t, _, _ in radix_results[r_uid]]
+            naive_tokens = [t for t, _, _ in naive_results[n_uid]]
+            self.assertEqual(len(radix_tokens), 4)
+            self.assertEqual(radix_tokens, naive_tokens)
+
+    def test_same_prompt_twice_consistent(self):
+        # Guards the stale-prefix-hit bug (match_prefix used to report the
+        # full sequence as cached, skipping the last token's forward): the
+        # second identical request hits the cached prefix via the extend
+        # path, and its output must equal the first cold run token-for-token.
+        from minisgl.config import SamplingParams
+
+        scheduler = TestEndToEndScheduler._make_engine_scheduler(seed=0)
+        prompt = list(range(10, 26))
+        params = SamplingParams(temperature=0.0, max_tokens=4)
+
+        # NOTE: add_request stores the caller's list by reference and appends
+        # generated tokens to it, so each run needs its own copy.
+        uid1 = scheduler.add_request(list(prompt), params)
+        first = TestEndToEndScheduler._run_to_completion(scheduler)[uid1]
+
+        uid2 = scheduler.add_request(list(prompt), params)
+        req2 = scheduler.prefill_manager.pending[0]
+        second = TestEndToEndScheduler._run_to_completion(scheduler)[uid2]
+        # The second run must have taken the extend path (cached prefix).
+        self.assertGreaterEqual(req2.cached_len, 8)
+        self.assertEqual(
+            [t for t, _, _ in second],
+            [t for t, _, _ in first],
+        )
+
+
+# ── Test Prefill Termination (Regression) ──
+class TestPrefillTermination(unittest.TestCase):
+    """Regression: termination is checked immediately after prefill."""
+
+    def test_eos_at_prefill_stops_immediately(self):
+        # Guards the missing post-prefill termination check: when the very
+        # first sampled token is EOS, the request must finish right after
+        # prefill instead of producing extra decode tokens.
+        from minisgl.config import SamplingParams
+
+        scheduler = TestEndToEndScheduler._make_engine_scheduler(seed=0)
+        # Probe: discover the greedy first token for this prompt.
+        scheduler.add_request([5, 6, 7], SamplingParams(temperature=0.0, max_tokens=1))
+        first_token = scheduler.step()[0][1]
+        self.assertTrue(scheduler.is_idle())
+
+        # Make that token an EOS and re-run with a larger token budget.
+        scheduler.eos_token_id.add(first_token)
+        uid = scheduler.add_request(
+            [5, 6, 7], SamplingParams(temperature=0.0, max_tokens=5)
+        )
+        results = TestEndToEndScheduler._run_to_completion(scheduler)[uid]
+        self.assertEqual(len(results), 1)
+        token_id, finished, reason = results[0]
+        self.assertEqual(token_id, first_token)
+        self.assertTrue(finished)
+        self.assertEqual(reason, "stop")
+
+    def test_max_tokens_one_generates_exactly_one(self):
+        # Same bug class via the length path: max_tokens=1 must produce
+        # exactly one token with finish_reason "length" at prefill time.
+        from minisgl.config import SamplingParams
+
+        scheduler = TestEndToEndScheduler._make_engine_scheduler(seed=0)
+        uid = scheduler.add_request(
+            [8, 9], SamplingParams(temperature=0.0, max_tokens=1, ignore_eos=True)
+        )
+        results = TestEndToEndScheduler._run_to_completion(scheduler)[uid]
+        self.assertEqual(len(results), 1)
+        _token_id, finished, reason = results[0]
+        self.assertTrue(finished)
+        self.assertEqual(reason, "length")
+
+
+# ── Test write_loc Guard (Regression) ──
+class TestWriteLocGuard(unittest.TestCase):
+    def test_negative_write_loc_does_not_touch_cache_tail(self):
+        # Guards the silent negative-index write bug: write_loc == -1 entries
+        # must be skipped; otherwise they write into the LAST rows of the KV
+        # cache and corrupt whatever sequence lives there.
+        from minisgl.config import ModelArgs
+        from minisgl.models.llama import LlamaAttention
+
+        config = ModelArgs(
+            hidden_size=64,
+            num_layers=1,
+            num_attention_heads=4,
+            num_kv_heads=2,
+            intermediate_size=128,
+            vocab_size=100,
+            max_position_embeddings=64,
+            head_dim=16,
+        )
+        attn = LlamaAttention(config)
+
+        num_kv_heads, head_dim = 2, 16
+        k_cache = torch.zeros(2, 4, num_kv_heads, head_dim)  # 8 flat slots
+        v_cache = torch.zeros(2, 4, num_kv_heads, head_dim)
+        k = torch.randn(1, num_kv_heads, 3, head_dim)
+        v = torch.randn(1, num_kv_heads, 3, head_dim)
+        write_loc = torch.tensor([0, -1, 5], dtype=torch.int32)
+
+        attn._write_kv_cache(k, v, k_cache, v_cache, write_loc)
+
+        flat_k = k_cache.view(-1, num_kv_heads, head_dim)
+        flat_v = v_cache.view(-1, num_kv_heads, head_dim)
+        # Valid slots were written.
+        self.assertTrue(torch.equal(flat_k[0], k[0, :, 0, :]))
+        self.assertTrue(torch.equal(flat_v[5], v[0, :, 2, :]))
+        # The -1 entry must not land in the last flat slot.
+        self.assertTrue(torch.all(flat_k[-1] == 0))
+        self.assertTrue(torch.all(flat_v[-1] == 0))
+
+
+# ── Test Radix Eviction End-to-End (Regression) ──
+class TestRadixEvictionE2E(unittest.TestCase):
+    def test_eviction_frees_pages_for_new_request(self):
+        # Guards two bugs at once: (1) finish() used to free pages directly
+        # (double-free risk under prefix sharing) — now the tree owns them;
+        # (2) evict() used to detach nodes without returning their pages to
+        # the pool. Here a 3-page pool fills up, and the second request can
+        # only be scheduled if evict() truly returns pages.
+        from minisgl.config import SamplingParams
+
+        scheduler = TestEndToEndScheduler._make_engine_scheduler(
+            seed=0, max_running_req=1, max_seq_len=16
+        )
+        pool = scheduler.pool
+        radix = scheduler.cache_manager
+        self.assertEqual(pool.num_pages, 3)
+
+        prompt_a = [10 + i for i in range(14)]
+        params = SamplingParams(temperature=0.0, max_tokens=2)
+        uid1 = scheduler.add_request(prompt_a, params)
+        results1 = TestEndToEndScheduler._run_to_completion(scheduler)[uid1]
+        self.assertEqual(len(results1), 2)
+        # Finish does NOT free pages: the tree still owns them (1 page left).
+        self.assertEqual(pool.free_count(), 1)
+        matched, _shared = radix.match_prefix(prompt_a)
+        self.assertEqual(matched, 8)
+
+        # Second request (disjoint prefix) needs 2 pages; only 1 is free, so
+        # scheduling it requires a real eviction.
+        prompt_b = [100 + i for i in range(14)]
+        uid2 = scheduler.add_request(prompt_b, params)
+        results2 = TestEndToEndScheduler._run_to_completion(scheduler)[uid2]
+        self.assertEqual(len(results2), 2)
+        # Eviction detached the tail of prompt_a's chain (tokens 8..13).
+        node = radix.root
+        for token in prompt_a[:8]:
+            node = node.children[token]
+        self.assertNotIn(prompt_a[8], node.children)
 
 
 # ── Test Device Utilities (NPU-aware) ──

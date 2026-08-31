@@ -84,7 +84,7 @@ def demo_engine_scheduler(model_path: str, max_tokens: int):
 
     t0 = time.perf_counter()
     while not scheduler.is_idle():
-        for uid, token_id, _finished in scheduler.step():
+        for uid, token_id, _finished, _reason in scheduler.step():
             uid_map[uid]["tokens"].append(token_id)
     elapsed = time.perf_counter() - t0
 
@@ -175,7 +175,7 @@ def demo_streaming(engine, server_args, tokenizer, max_tokens: int):
     start = time.perf_counter()
     first_token_time = None
     while not scheduler.is_idle():
-        for r_uid, token_id, _finished in scheduler.step():
+        for r_uid, token_id, _finished, _reason in scheduler.step():
             if r_uid == uid:
                 if first_token_time is None:
                     first_token_time = time.perf_counter() - start
@@ -224,7 +224,7 @@ def demo_sampling(engine, server_args, tokenizer, max_tokens: int):
         scheduler.add_request(list(input_ids), sampling)
         tokens = []
         while not scheduler.is_idle():
-            for _, token_id, _ in scheduler.step():
+            for _, token_id, _, _reason in scheduler.step():
                 tokens.append(token_id)
         output = tokenizer.decode(tokens, skip_special_tokens=True)
         print(f"  [{label:>22}] {output!r}")

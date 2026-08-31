@@ -1,6 +1,7 @@
 """Main scheduler: coordinates prefill/decode cycles and tokenizer communication."""
 
 __all__ = ["Scheduler"]
+import contextlib
 import json
 from collections import deque
 from pathlib import Path
@@ -112,11 +113,13 @@ class Scheduler:
                 len(input_ids),
                 self.args.max_seq_len,
             )
-            self._aborted.append((uid, next(iter(self.eos_token_id)), True))
+            self._aborted.append((uid, next(iter(self.eos_token_id)), True, "abort"))
             return uid
 
         req = Req(
-            input_ids=input_ids,
+            # Copy: the scheduler appends generated tokens in-place, so the
+            # caller's list must not be aliased.
+            input_ids=list(input_ids),
             uid=uid,
             sampling_params=sampling_params,
             cached_len=0,
@@ -124,17 +127,41 @@ class Scheduler:
         self.prefill_manager.add_request(req)
         return uid
 
-    def _check_finished(self, req: Req, token_id: int) -> bool:
-        """Check whether the request should stop after appending token_id."""
+    def _finish_reason(self, req: Req, token_id: int) -> str | None:
+        """Return why the request should stop after token_id, or None to continue."""
         if token_id in self.eos_token_id and not req.sampling_params.ignore_eos:
-            return True
-        return (
+            return "stop"
+        if (
             req.output_len >= req.sampling_params.max_tokens
             or len(req.input_ids) >= self.args.max_seq_len
-        )
+        ):
+            return "length"
+        return None
+
+    def abort_request(self, uid: int) -> bool:
+        """Abort a pending or running request by UID, releasing its resources.
+
+        Returns True if the request was found and aborted, False otherwise.
+        """
+        with self.prefill_manager._lock:
+            for queue_ in (self.prefill_manager.pending, self.prefill_manager.running):
+                for req in queue_:
+                    if req.uid == uid:
+                        req.status = SequenceStatus.FINISHED
+                        with contextlib.suppress(ValueError):
+                            queue_.remove(req)
+                        self.prefill_manager._remove_finished_nolock(req)
+                        logger.info("Aborted request %s", uid)
+                        return True
+        return False
 
     def step(self) -> list[tuple]:
-        """Run one scheduler iteration: prefill new requests, then decode running ones."""
+        """Run one scheduler iteration: prefill new requests, then decode running ones.
+
+        Returns a list of (uid, token_id, finished, finish_reason) tuples, where
+        finish_reason is None for in-progress tokens and one of "stop" / "length"
+        / "abort" for the final token ("abort" means token_id is meaningless).
+        """
         results: list[tuple] = []
         while self._aborted:
             results.append(self._aborted.popleft())
@@ -147,17 +174,17 @@ class Scheduler:
             next_tokens = self.engine.sample(logits, prefill_batch)
             for req, token_id in zip(prefill_batch.reqs, next_tokens, strict=True):
                 req.append_token(token_id)
-                finished = self._check_finished(req, token_id)
-                if finished:
+                reason = self._finish_reason(req, token_id)
+                if reason is not None:
                     req.status = SequenceStatus.FINISHED
                     finished_reqs.append(req)
-                results.append((req.uid, token_id, finished))
+                results.append((req.uid, token_id, reason is not None, reason))
 
         # Requests aborted during scheduling never ran; report them as finished
         # so callers waiting on them stop waiting.
         if self.prefill_manager.aborted:
             for req in self.prefill_manager.aborted:
-                results.append((req.uid, next(iter(self.eos_token_id)), True))
+                results.append((req.uid, next(iter(self.eos_token_id)), True, "abort"))
             self.prefill_manager.aborted.clear()
 
         # Skip requests already finished by this step's prefill.
@@ -170,11 +197,11 @@ class Scheduler:
 
                 for req, token_id in zip(decode_batch.reqs, next_tokens, strict=True):
                     req.append_token(token_id)
-                    finished = self._check_finished(req, token_id)
-                    if finished:
+                    reason = self._finish_reason(req, token_id)
+                    if reason is not None:
                         req.status = SequenceStatus.FINISHED
                         finished_reqs.append(req)
-                    results.append((req.uid, token_id, finished))
+                    results.append((req.uid, token_id, reason is not None, reason))
 
         if finished_reqs:
             self.prefill_manager.remove_finished_batch(finished_reqs)

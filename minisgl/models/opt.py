@@ -203,7 +203,7 @@ class OPTForCausalLM(nn.Module):
         super().__init__()
         self.model = OPTModel(config)
         self.lm_head = ColumnParallelLinear(
-            config.hidden_size, config.vocab_size, bias=False
+            config.hidden_size, config.vocab_size, bias=False, gather_output=True
         )
         self.config = config
 
@@ -214,11 +214,19 @@ class OPTForCausalLM(nn.Module):
         k_cache: torch.Tensor | None = None,
         v_cache: torch.Tensor | None = None,
         write_loc: torch.Tensor | None = None,
+        logits_indices: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         hidden_states = self.model(
             input_ids, positions, k_cache, v_cache, write_loc, **kwargs
         )
+        if logits_indices is not None:
+            # Prefill fast path: sampling only consumes the last uncached
+            # token of each request, so gather those rows and run the (very
+            # expensive) full-vocab lm_head projection on them alone.
+            if hidden_states.dim() == 3:
+                hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+            hidden_states = hidden_states[logits_indices]
         return self.lm_head(hidden_states)
 
     def tie_weights(self, state_dict: dict) -> None:

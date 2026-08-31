@@ -50,7 +50,9 @@ class LLM:
         logger.info("Loading model from %s", model_path)
         self.engine = Engine(server_args, model_args, tp_rank=0)
         self.scheduler = Scheduler(server_args, self.engine)
-        self.tokenizer = TokenizerWorker(model_path, trust_remote_code=trust_remote_code)
+        self.tokenizer = TokenizerWorker(
+            model_path, trust_remote_code=trust_remote_code
+        )
 
         logger.info("LLM ready")
 
@@ -99,14 +101,13 @@ class LLM:
             max_tokens=max_tokens,
         )
 
-        results: list[str] = []
+        output_ids: list[list[int]] = [[] for _ in prompt_list]
         uid_to_idx = {}
 
         for i, prompt in enumerate(prompt_list):
             input_ids = self.tokenizer.encode(prompt)
             uid = self.scheduler.add_request(input_ids, sampling_params)
             uid_to_idx[uid] = i
-            results.append("")
 
         pending_uids = set(uid_to_idx.keys())
         while pending_uids:
@@ -114,13 +115,20 @@ class LLM:
             if not step_results:
                 time.sleep(0.0001)  # yield CPU when idle
                 continue
-            for uid, token_id, finished in step_results:
+            for uid, token_id, finished, finish_reason in step_results:
                 if uid in pending_uids:
                     idx = uid_to_idx[uid]
-                    text = self.tokenizer.decode(token_id)
-                    results[idx] += text
+                    # Aborted requests carry a meaningless token_id.
+                    if finish_reason != "abort":
+                        output_ids[idx].append(token_id)
                     if finished:
                         pending_uids.discard(uid)
+
+        # Decode the full token list at once: per-token decode would corrupt
+        # multi-byte UTF-8 characters split across tokens.
+        results = [
+            self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids
+        ]
 
         return results[0] if single_input else results
 

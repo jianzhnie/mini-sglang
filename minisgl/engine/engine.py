@@ -21,7 +21,6 @@ from minisgl.utils.device import (
     get_device,
     get_device_type,
     init_distributed,
-    is_accelerator_available,
     mem_get_info,
     synchronize,
 )
@@ -44,6 +43,35 @@ def _get_remap_fn(model_type: str):
 
         return _remap
     return None
+
+
+def _resolve_dtype(dtype_str: str, model_path: str, device_type: str) -> torch.dtype:
+    """Resolve the target model dtype from the --dtype CLI value.
+
+    'auto' reads torch_dtype from the model's config.json (float32 fallback).
+    CPU only supports float32 reliably: anything else is forced to float32.
+    """
+    if dtype_str == "auto":
+        import json
+        from pathlib import Path
+
+        config_file = Path(model_path) / "config.json"
+        dtype_str = "float32"
+        if config_file.exists():
+            with config_file.open() as f:
+                dtype_str = json.load(f).get("torch_dtype", "float32")
+
+    dtype = getattr(torch, dtype_str, None)
+    if not isinstance(dtype, torch.dtype):
+        logger.warning("Unknown dtype %r; falling back to float32", dtype_str)
+        dtype = torch.float32
+
+    if device_type == "cpu" and dtype != torch.float32:
+        logger.warning(
+            "dtype %s is not fully supported on CPU; falling back to float32", dtype
+        )
+        dtype = torch.float32
+    return dtype
 
 
 class Engine:
@@ -83,7 +111,10 @@ class Engine:
         AttentionBackend.configure(server_args.attention_backend)
 
         self.model = self._create_model()
-        self.model.to(self.device)
+        self.dtype = _resolve_dtype(
+            server_args.dtype, server_args.model_path, self.device.type
+        )
+        self.model.to(device=self.device, dtype=self.dtype)
         self.model.eval()
         # No autograd during capture/replay (or any inference forward).
         self.model.requires_grad_(False)
@@ -145,7 +176,7 @@ class Engine:
         if (
             server_args.cuda_graph_bs
             and server_args.cuda_graph_bs > 0
-            and is_accelerator_available()
+            and self.device.type in ("cuda", "npu")
         ):
             self._capture_graphs()
 
@@ -190,7 +221,7 @@ class Engine:
         args = self.server_args
         ma = self.model_args
 
-        if is_accelerator_available():
+        if self.device.type in ("cuda", "npu"):
             free_mem, total_mem = mem_get_info(self.device)
             used_mem = total_mem - free_mem
             available_mem = int(total_mem * args.memory_ratio - used_mem)
@@ -251,6 +282,7 @@ class Engine:
                     prefix_lens=batch.prefix_lens,
                     block_table=batch.block_table,
                     max_seqlen=batch.max_seqlen,
+                    logits_indices=batch.logits_indices,
                     forward_mode="prefill",
                 )
 
@@ -310,18 +342,10 @@ class Engine:
                 logits = logits.unsqueeze(0)  # (1, vocab_size)
             return self._sample_batched(logits, batch.reqs)
 
-        # Prefill: collect last-position logits per request
-        last_logits = []
-        offset = 0
-        for req in batch.reqs:
-            req_len = req.uncached_len
-            last_logits.append(logits[offset + req_len - 1 : offset + req_len])
-            offset += req_len
-
-        if last_logits:
-            batched = torch.cat(last_logits, dim=0)  # (num_reqs, vocab_size)
-            return self._sample_batched(batched, batch.reqs)
-        return []
+        # Prefill: forward already gathered each request's last-position
+        # logits via logits_indices — logits is (num_reqs, vocab_size),
+        # one row per request, in request order.
+        return self._sample_batched(logits, batch.reqs)
 
     def _sample_batched(self, logits: torch.Tensor, reqs: list) -> list:
         """Batch sample by grouping requests with identical sampling params.
@@ -354,7 +378,7 @@ class Engine:
 
     def _capture_graphs(self) -> None:
         """Capture execution graphs for decode phase (CUDA or NPU)."""
-        if not is_accelerator_available():
+        if self.device.type not in ("cuda", "npu"):
             logger.info("No accelerator available, skipping graph capture")
             return
 
@@ -416,9 +440,7 @@ class Engine:
 
         input_ids = torch.ones(batch_size, 1, dtype=torch.long, device=device)
         positions = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
-        write_loc = torch.full(
-            (batch_size,), pad_loc, dtype=torch.int32, device=device
-        )
+        write_loc = torch.full((batch_size,), pad_loc, dtype=torch.int32, device=device)
         cache_seqlens = torch.ones(batch_size, dtype=torch.int32, device=device)
         block_table = torch.full(
             (batch_size, max_blocks), pad_page, dtype=torch.int32, device=device
