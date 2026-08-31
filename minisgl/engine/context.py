@@ -39,7 +39,7 @@ class BatchContext:
         seq_lengths = []
 
         for req in reqs:
-            uncached_tokens = req.input_ids[req.cached_len:]
+            uncached_tokens = req.input_ids[req.cached_len :]
             all_input_ids.extend(uncached_tokens)
             start_pos = req.cached_len
             end_pos = len(req.input_ids)

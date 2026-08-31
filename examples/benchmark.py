@@ -24,7 +24,9 @@ MODELS_ROOT = "/home/jianzhnie/llmtuner/hfhub/models"
 
 def _find_model(*names: str) -> str:
     env_root = os.environ.get("MINISGL_MODELS", "")
-    roots = [r for r in [env_root, MODELS_ROOT, str(Path.home() / "hfhub" / "models")] if r]
+    roots = [
+        r for r in [env_root, MODELS_ROOT, str(Path.home() / "hfhub" / "models")] if r
+    ]
     for name in names:
         for root in roots:
             p = Path(root) / name
@@ -43,7 +45,6 @@ def _validate(path: str) -> None:
 def benchmark_prefill(engine, scheduler_cls, server_args, tokenizer, input_lengths):
     """Benchmark time-to-first-token at various input lengths."""
     from minisgl.config import SamplingParams
-    from minisgl.scheduler.scheduler import Scheduler
 
     print("\n── Prefill Latency (Time to First Token) ──")
     print(f"  {'Input Len':<12}{'TTFT (ms)':<12}{'Prefill tok/s':<15}")
@@ -65,15 +66,18 @@ def benchmark_prefill(engine, scheduler_cls, server_args, tokenizer, input_lengt
         print(f"  {input_len:<12}{ttft_ms:<12.1f}{prefill_tps:<15.0f}")
 
 
-def benchmark_decode_throughput(engine, scheduler_cls, server_args, tokenizer, batch_sizes):
+def benchmark_decode_throughput(
+    engine, scheduler_cls, server_args, tokenizer, batch_sizes
+):
     """Benchmark decode throughput at various batch sizes."""
     from minisgl.config import SamplingParams
-    from minisgl.scheduler.scheduler import Scheduler
 
     decode_tokens = 20
 
     print("\n── Decode Throughput (batch generation) ──")
-    print(f"  {'Batch Size':<12}{'Total tok/s':<14}{'Per-req tok/s':<15}{'Time (s)':<10}")
+    print(
+        f"  {'Batch Size':<12}{'Total tok/s':<14}{'Per-req tok/s':<15}{'Time (s)':<10}"
+    )
     print(f"  {'─' * 50}")
 
     for batch_size in batch_sizes:
@@ -93,13 +97,14 @@ def benchmark_decode_throughput(engine, scheduler_cls, server_args, tokenizer, b
 
         total_tps = total_generated / elapsed if elapsed > 0 else 0
         per_req_tps = total_tps / batch_size if batch_size > 0 else 0
-        print(f"  {batch_size:<12}{total_tps:<14.1f}{per_req_tps:<15.1f}{elapsed:<10.3f}")
+        print(
+            f"  {batch_size:<12}{total_tps:<14.1f}{per_req_tps:<15.1f}{elapsed:<10.3f}"
+        )
 
 
 def benchmark_e2e(engine, scheduler_cls, server_args, tokenizer):
     """End-to-end benchmark with realistic prompts."""
     from minisgl.config import SamplingParams
-    from minisgl.scheduler.scheduler import Scheduler
 
     prompts = [
         "The meaning of life is",

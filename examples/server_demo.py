@@ -28,7 +28,9 @@ HOST, PORT = "127.0.0.1", 8765
 
 def _find_model(*names: str) -> str:
     env_root = os.environ.get("MINISGL_MODELS", "")
-    roots = [r for r in [env_root, MODELS_ROOT, str(Path.home() / "hfhub" / "models")] if r]
+    roots = [
+        r for r in [env_root, MODELS_ROOT, str(Path.home() / "hfhub" / "models")] if r
+    ]
     for name in names:
         for root in roots:
             p = Path(root) / name
@@ -48,7 +50,9 @@ def _request(path: str, body: dict = None) -> dict:
     url = f"http://{HOST}:{PORT}{path}"
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(
-        url, data=data, method="GET" if body is None else "POST",
+        url,
+        data=data,
+        method="GET" if body is None else "POST",
     )
     req.add_header("Content-Type", "application/json")
     with urllib.request.urlopen(req, timeout=120) as resp:
@@ -180,7 +184,7 @@ if __name__ == "__main__":
         )
         content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
         content = content.replace("\n", "\\n") if content else "(empty)"
-        print(f"  User: The weather today is")
+        print("  User: The weather today is")
         print(f"  Assistant: {content}")
     finally:
         print("\n" + "=" * 60)

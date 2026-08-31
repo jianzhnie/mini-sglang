@@ -8,6 +8,7 @@ from threading import Lock
 from minisgl.config import ServerArgs
 from minisgl.engine.kvcache.pool import CacheManager, KVCachePool
 from minisgl.scheduler.batch import Batch, Req, SequenceStatus
+from minisgl.utils.logger import logger
 
 
 class PrefillManager:
@@ -28,6 +29,9 @@ class PrefillManager:
         self.radix_cache = radix_cache
         self.pending: deque[Req] = deque()
         self.running: list[Req] = []
+        # Requests that can never be satisfied (e.g., need more pages than the
+        # whole pool); the Scheduler reports them as finished.
+        self.aborted: list[Req] = []
         self._lock = Lock()
 
     def add_request(self, req: Req) -> None:
@@ -46,7 +50,10 @@ class PrefillManager:
             scheduled: list[Req] = []
             total_tokens = 0
 
-            while self.pending and len(scheduled) < self.max_running_req:
+            while (
+                self.pending
+                and len(self.running) + len(scheduled) < self.max_running_req
+            ):
                 req = self.pending[0]
 
                 # Check if total tokens would exceed budget
@@ -59,6 +66,20 @@ class PrefillManager:
                 req.cached_len = max(req.cached_len, matched_len)
 
                 new_pages = self._pages_needed(req)
+
+                if new_pages > self.pool.num_pages:
+                    # A single request larger than the whole pool can never be
+                    # satisfied by eviction or waiting; abort it explicitly.
+                    logger.warning(
+                        "Aborting request %s: needs %s pages, pool has only %s",
+                        req.uid,
+                        new_pages,
+                        self.pool.num_pages,
+                    )
+                    self.pending.popleft()
+                    req.status = SequenceStatus.FINISHED
+                    self.aborted.append(req)
+                    continue
 
                 if self.pool.free_count() < new_pages:
                     # Try eviction

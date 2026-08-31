@@ -21,7 +21,6 @@ from minisgl.utils.device import (
     get_device_type,
     init_distributed,
     is_accelerator_available,
-    is_npu_available,
     mem_get_info,
     synchronize,
 )
@@ -285,9 +284,9 @@ class Engine:
         for indices in groups.values():
             batch_logits = logits[indices]
             params = reqs[indices[0]].sampling_params
-            tokens = self.sampler.sample(batch_logits, params)
+            tokens = self.sampler.sample(batch_logits, params).tolist()
             for j, idx in enumerate(indices):
-                token_ids[idx] = tokens[j].item()
+                token_ids[idx] = tokens[j]
 
         return token_ids
 
@@ -315,9 +314,7 @@ class Engine:
         try:
             self._capture_graph(batch_size)
         except RuntimeError as e:
-            logger.warning(
-                "Failed to capture graph for bs=%d: %s", batch_size, e
-            )
+            logger.warning("Failed to capture graph for bs=%d: %s", batch_size, e)
 
     def _capture_graph(self, batch_size: int) -> None:
         """Capture a single execution graph for a given batch size.
@@ -343,6 +340,7 @@ class Engine:
 
         if self._device_type == "npu":
             import os
+
             os.environ.setdefault("TASK_QUEUE_ENABLE", "1")
             graph = torch.npu.NPUGraph()
             with torch.npu.graph(graph):

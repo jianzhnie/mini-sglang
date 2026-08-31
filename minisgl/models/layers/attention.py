@@ -94,8 +94,11 @@ class BaseAttention(nn.Module):
         flat_in_k = k.transpose(1, 2).reshape(-1, num_kv_heads, head_dim)
         flat_in_v = v.transpose(1, 2).reshape(-1, num_kv_heads, head_dim)
         idx = write_loc.long()
-        flat_k[idx] = flat_in_k
-        flat_v[idx] = flat_in_v
+        # Filter out invalid slots (idx == -1); otherwise negative indices would
+        # silently write into the last rows of the cache.
+        valid = idx >= 0
+        flat_k[idx[valid]] = flat_in_k[valid]
+        flat_v[idx[valid]] = flat_in_v[valid]
 
     def _reshape_output(
         self,

@@ -226,9 +226,7 @@ class PyTorchBackend:
 
         cu_seqlens_q = kwargs.get("cu_seqlens_q")
         if cu_seqlens_q is not None and len(cu_seqlens_q) > 2:
-            return PyTorchBackend._prefill_varlen(
-                q, k, v, cu_seqlens_q, scale
-            )
+            return PyTorchBackend._prefill_varlen(q, k, v, cu_seqlens_q, scale)
 
         return F.scaled_dot_product_attention(
             q,
@@ -259,7 +257,9 @@ class PyTorchBackend:
             ki = k[:, :, start:end, :]
             vi = v[:, :, start:end, :]
             out_i = F.scaled_dot_product_attention(
-                qi, ki, vi,
+                qi,
+                ki,
+                vi,
                 attn_mask=None,
                 dropout_p=0.0,
                 is_causal=True,
@@ -314,8 +314,8 @@ class PyTorchBackend:
         gathered_v = gathered_v.transpose(1, 2)
 
         num_reqs = q.shape[0]
-        attn_mask = valid_mask.unsqueeze(1).unsqueeze(2).expand(
-            num_reqs, num_heads, 1, max_len
+        attn_mask = (
+            valid_mask.unsqueeze(1).unsqueeze(2).expand(num_reqs, num_heads, 1, max_len)
         )
         attn_bias = torch.zeros(
             num_reqs, num_heads, 1, max_len, dtype=q.dtype, device=q.device

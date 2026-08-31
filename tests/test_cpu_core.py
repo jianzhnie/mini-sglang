@@ -456,13 +456,15 @@ class TestModelDummy(unittest.TestCase):
         )
         gen = torch.Generator().manual_seed(123)
         model = Qwen2ForCausalLM(config)
-        for name, param in model.named_parameters():
+        for _name, param in model.named_parameters():
             if param.dim() >= 2:
                 nn.init.normal_(param, std=0.02, generator=gen)
             elif param.dim() == 1:
                 nn.init.ones_(param)
         model.eval()
-        input_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]])
+        input_ids = torch.tensor(
+            [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]]
+        )
         positions = torch.arange(16)
         with torch.inference_mode():
             logits = model(input_ids=input_ids, positions=positions)
@@ -620,7 +622,6 @@ class TestRegistry(unittest.TestCase):
             self.assertEqual(out.shape, (1, 4, 100))
 
 
-
 # ── Test NaiveCacheManager ──
 class TestNaiveCacheManager(unittest.TestCase):
     def _make_pool(self, num_pages=50):
@@ -710,7 +711,6 @@ class TestRadixCacheEvictRemove(unittest.TestCase):
         pool, radix = self._make_pool_and_radix(20)
         tokens = [1, 2, 3, 4, 5, 6, 7, 8]
         handle = pool.alloc(2)
-        initial_free = pool.free_count()
         radix.insert(tokens, handle)
         radix.remove(tokens)
         evicted = radix.evict(2)
@@ -799,9 +799,13 @@ class TestDecodeManager(unittest.TestCase):
 
         args = ServerArgs(model_path="/tmp/test", max_seq_len=64, page_size=4)
         pool = KVCachePool(
-            num_layers=2, num_pages=10, page_size=4,
-            num_kv_heads=4, head_dim=32,
-            dtype=torch.float32, device=torch.device("cpu"),
+            num_layers=2,
+            num_pages=10,
+            page_size=4,
+            num_kv_heads=4,
+            head_dim=32,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
         )
         dm = DecodeManager(args, pool, device=torch.device("cpu"))
         self.assertIsNone(dm.schedule_decode([]))
@@ -823,9 +827,13 @@ class TestPrefillManager(unittest.TestCase):
             page_size=4,
         )
         pool = KVCachePool(
-            num_layers=2, num_pages=50, page_size=4,
-            num_kv_heads=4, head_dim=32,
-            dtype=torch.float32, device=torch.device("cpu"),
+            num_layers=2,
+            num_pages=50,
+            page_size=4,
+            num_kv_heads=4,
+            head_dim=32,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
         )
         cache = NaiveCacheManager(pool, page_size=4)
         pm = PrefillManager(args, pool, cache)
@@ -851,9 +859,13 @@ class TestPrefillManager(unittest.TestCase):
 
         args = ServerArgs(model_path="/tmp/test", max_seq_len=64, page_size=4)
         pool = KVCachePool(
-            num_layers=2, num_pages=20, page_size=4,
-            num_kv_heads=4, head_dim=32,
-            dtype=torch.float32, device=torch.device("cpu"),
+            num_layers=2,
+            num_pages=20,
+            page_size=4,
+            num_kv_heads=4,
+            head_dim=32,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
         )
         cache = NaiveCacheManager(pool, page_size=4)
         pm = PrefillManager(args, pool, cache)
@@ -926,7 +938,6 @@ class TestEndToEndScheduler(unittest.TestCase):
         from minisgl.config import ModelArgs, ServerArgs
         from minisgl.engine.engine import Engine
         from minisgl.scheduler.scheduler import Scheduler
-        from minisgl.utils.device import get_device
 
         tmpdir = tempfile.mkdtemp()
         config = {
@@ -942,6 +953,7 @@ class TestEndToEndScheduler(unittest.TestCase):
             "eos_token_id": 2,
         }
         import os
+
         with open(os.path.join(tmpdir, "config.json"), "w") as f:
             json.dump(config, f)
 
@@ -957,7 +969,6 @@ class TestEndToEndScheduler(unittest.TestCase):
             cuda_graph_bs=0,
         )
         engine = Engine(server_args, model_args, tp_rank=0)
-        device = get_device()
         for param in engine.model.parameters():
             if param.dim() >= 2:
                 nn.init.normal_(param, std=0.02)
@@ -974,7 +985,7 @@ class TestEndToEndScheduler(unittest.TestCase):
         generated = []
         steps = 0
         while not scheduler.is_idle() and steps < 100:
-            for _uid, token_id, finished in scheduler.step():
+            for _uid, token_id, _finished in scheduler.step():
                 generated.append(token_id)
             steps += 1
         self.assertGreater(len(generated), 0)
@@ -984,19 +995,22 @@ class TestEndToEndScheduler(unittest.TestCase):
         from minisgl.config import SamplingParams
 
         scheduler = self._make_engine_scheduler()
-        uid1 = scheduler.add_request([1, 2, 3], SamplingParams(temperature=0.0, max_tokens=3))
-        uid2 = scheduler.add_request([4, 5, 6], SamplingParams(temperature=0.0, max_tokens=3))
+        uid1 = scheduler.add_request(
+            [1, 2, 3], SamplingParams(temperature=0.0, max_tokens=3)
+        )
+        uid2 = scheduler.add_request(
+            [4, 5, 6], SamplingParams(temperature=0.0, max_tokens=3)
+        )
         results = {uid1: [], uid2: []}
         steps = 0
         while not scheduler.is_idle() and steps < 100:
-            for uid, token_id, finished in scheduler.step():
+            for uid, token_id, _finished in scheduler.step():
                 results[uid].append(token_id)
             steps += 1
         self.assertGreater(len(results[uid1]), 0)
         self.assertGreater(len(results[uid2]), 0)
 
     def test_eos_terminates_early(self):
-        from minisgl.config import SamplingParams
 
         scheduler = self._make_engine_scheduler()
         self.assertIsInstance(scheduler.eos_token_id, set)
@@ -1018,8 +1032,11 @@ class TestPyTorchBackendDecode(unittest.TestCase):
         cache_seqlens = torch.tensor([3, 5], dtype=torch.int32)
 
         out = PyTorchBackend.forward(
-            q, q[:, :, :, :], q[:, :, :, :],
-            k_cache=k_cache, v_cache=v_cache,
+            q,
+            q[:, :, :, :],
+            q[:, :, :, :],
+            k_cache=k_cache,
+            v_cache=v_cache,
             req_to_token=req_to_token,
             cache_seqlens=cache_seqlens,
         )
@@ -1102,12 +1119,15 @@ class TestFrontendManager(unittest.TestCase):
 
         class MockScheduler:
             _uid = 0
+
             def add_request(self, input_ids, sampling_params):
                 uid = self._uid
                 self._uid += 1
                 return uid
+
             def is_idle(self):
                 return True
+
             def step(self):
                 return []
 
@@ -1183,7 +1203,7 @@ class TestServerArgsDevice(unittest.TestCase):
         self.assertEqual(args.device, "auto")
 
     def test_attention_backend_pt(self):
-        from minisgl.models.attention.backend import AttentionBackend, PyTorchBackend
+        from minisgl.models.attention.backend import AttentionBackend
 
         AttentionBackend.configure("pt")
         q = torch.randn(1, 4, 8, 32)

@@ -179,8 +179,13 @@ class Qwen3MoEModel(nn.Module):
             layer_k_cache = k_cache[i] if k_cache is not None else None
             layer_v_cache = v_cache[i] if v_cache is not None else None
             hidden_states = layer(
-                hidden_states, positions, residual,
-                layer_k_cache, layer_v_cache, write_loc, **kwargs,
+                hidden_states,
+                positions,
+                residual,
+                layer_k_cache,
+                layer_v_cache,
+                write_loc,
+                **kwargs,
             )
         hidden_states, _ = self.norm(hidden_states)
         return hidden_states

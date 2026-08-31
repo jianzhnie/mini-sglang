@@ -2,6 +2,7 @@
 
 __all__ = ["Scheduler"]
 import json
+from collections import deque
 from pathlib import Path
 
 from minisgl.config import SamplingParams, ServerArgs
@@ -48,6 +49,8 @@ class Scheduler:
 
         self._uid_counter = 0
         self.eos_token_id = self._load_eos_token()
+        # Results for requests rejected at add time (e.g., prompt too long).
+        self._aborted: deque[tuple] = deque()
 
     def _load_eos_token(self) -> set[int]:
         """Load EOS token ID(s) from model config, with tokenizer fallback.
@@ -81,7 +84,7 @@ class Scheduler:
                 raw_eos = cfg.get("eos_token_id", 0)
 
         if raw_eos is None:
-            logger.warning("Could not determine EOS token ID, using {0}")
+            logger.warning("Could not determine EOS token ID, using %s", 0)
             return {0}
 
         return self._normalize_eos(raw_eos)
@@ -102,6 +105,16 @@ class Scheduler:
         uid = self._uid_counter
         self._uid_counter += 1
 
+        if len(input_ids) > self.args.max_seq_len:
+            logger.warning(
+                "Rejecting request %s: prompt length %s exceeds max_seq_len %s",
+                uid,
+                len(input_ids),
+                self.args.max_seq_len,
+            )
+            self._aborted.append((uid, next(iter(self.eos_token_id)), True))
+            return uid
+
         req = Req(
             input_ids=input_ids,
             uid=uid,
@@ -111,40 +124,60 @@ class Scheduler:
         self.prefill_manager.add_request(req)
         return uid
 
+    def _check_finished(self, req: Req, token_id: int) -> bool:
+        """Check whether the request should stop after appending token_id."""
+        if token_id in self.eos_token_id and not req.sampling_params.ignore_eos:
+            return True
+        return (
+            req.output_len >= req.sampling_params.max_tokens
+            or len(req.input_ids) >= self.args.max_seq_len
+        )
+
     def step(self) -> list[tuple]:
         """Run one scheduler iteration: prefill new requests, then decode running ones."""
         results: list[tuple] = []
+        while self._aborted:
+            results.append(self._aborted.popleft())
+
+        finished_reqs: list[Req] = []
 
         prefill_batch = self.prefill_manager.schedule_prefill()
         if prefill_batch is not None:
             logits = self.engine.forward(prefill_batch)
             next_tokens = self.engine.sample(logits, prefill_batch)
-            for req, token_id in zip(prefill_batch.reqs, next_tokens, strict=False):
+            for req, token_id in zip(prefill_batch.reqs, next_tokens, strict=True):
                 req.append_token(token_id)
-                results.append((req.uid, token_id, False))
+                finished = self._check_finished(req, token_id)
+                if finished:
+                    req.status = SequenceStatus.FINISHED
+                    finished_reqs.append(req)
+                results.append((req.uid, token_id, finished))
 
-        running = self.prefill_manager.running
+        # Requests aborted during scheduling never ran; report them as finished
+        # so callers waiting on them stop waiting.
+        if self.prefill_manager.aborted:
+            for req in self.prefill_manager.aborted:
+                results.append((req.uid, next(iter(self.eos_token_id)), True))
+            self.prefill_manager.aborted.clear()
+
+        # Skip requests already finished by this step's prefill.
+        running = [req for req in self.prefill_manager.running if not req.is_finished]
         if running:
             decode_batch = self.decode_manager.schedule_decode(running)
             if decode_batch is not None:
                 logits = self.engine.forward(decode_batch)
                 next_tokens = self.engine.sample(logits, decode_batch)
 
-                finished_reqs: list[Req] = []
-                for req, token_id in zip(decode_batch.reqs, next_tokens, strict=False):
+                for req, token_id in zip(decode_batch.reqs, next_tokens, strict=True):
                     req.append_token(token_id)
-                    finished = False
-                    if (
-                        token_id in self.eos_token_id
-                        and not req.sampling_params.ignore_eos
-                    ) or req.output_len >= req.sampling_params.max_tokens:
-                        finished = True
+                    finished = self._check_finished(req, token_id)
+                    if finished:
                         req.status = SequenceStatus.FINISHED
                         finished_reqs.append(req)
                     results.append((req.uid, token_id, finished))
 
-                if finished_reqs:
-                    self.prefill_manager.remove_finished_batch(finished_reqs)
+        if finished_reqs:
+            self.prefill_manager.remove_finished_batch(finished_reqs)
 
         return results
 

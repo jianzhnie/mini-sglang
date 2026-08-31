@@ -37,7 +37,6 @@ def main() -> None:
     intermediate_size = 512
     vocab_size = 256
     max_pos = 64
-    head_dim = hidden_size // num_heads
 
     with tempfile.TemporaryDirectory() as tmpdir:
         config = {

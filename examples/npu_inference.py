@@ -30,7 +30,11 @@ MODELS_ROOT = "/home/jianzhnie/llmtuner/hfhub/models/Qwen"
 
 def _find_model(*names: str) -> str:
     env_root = os.environ.get("MINISGL_MODELS", "")
-    roots = [r for r in [env_root, MODELS_ROOT, str(Path.home() / "hfhub" / "models" / "Qwen")] if r]
+    roots = [
+        r
+        for r in [env_root, MODELS_ROOT, str(Path.home() / "hfhub" / "models" / "Qwen")]
+        if r
+    ]
     for name in names:
         for root in roots:
             p = Path(root) / name
@@ -63,9 +67,14 @@ def test_model(model_path: str, max_tokens: int = 20) -> dict:
 
     try:
         server_args = ServerArgs(
-            model_path=model_path, tp_size=1, attention_backend="pt",
-            max_running_req=8, max_seq_len=256, page_size=16,
-            memory_ratio=0.5, cuda_graph_bs=0,
+            model_path=model_path,
+            tp_size=1,
+            attention_backend="pt",
+            max_running_req=8,
+            max_seq_len=256,
+            page_size=16,
+            memory_ratio=0.5,
+            cuda_graph_bs=0,
         )
         model_args = ModelArgs.from_pretrained(model_path)
 
@@ -74,6 +83,7 @@ def test_model(model_path: str, max_tokens: int = 20) -> dict:
         result["load_time"] = time.perf_counter() - t0
 
         from transformers import AutoTokenizer
+
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
         # Single generation
@@ -87,7 +97,7 @@ def test_model(model_path: str, max_tokens: int = 20) -> dict:
         t0 = time.perf_counter()
         ttft = None
         while not scheduler.is_idle():
-            for r_uid, token_id, finished in scheduler.step():
+            for r_uid, token_id, _finished in scheduler.step():
                 if r_uid == uid:
                     if ttft is None:
                         ttft = time.perf_counter() - t0
@@ -130,14 +140,20 @@ def test_model(model_path: str, max_tokens: int = 20) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="Mini-SGLang NPU Inference")
     parser.add_argument("--model-path", type=str, default=None)
-    parser.add_argument("--models", nargs="+", default=None,
-                        help="Model names under MODELS_ROOT (e.g., Qwen3-0.6B)")
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        default=None,
+        help="Model names under MODELS_ROOT (e.g., Qwen3-0.6B)",
+    )
     parser.add_argument("--max-tokens", type=int, default=20)
-    parser.add_argument("--device", type=str, default="auto",
-                        choices=["auto", "npu", "cuda", "cpu"])
+    parser.add_argument(
+        "--device", type=str, default="auto", choices=["auto", "npu", "cuda", "cpu"]
+    )
     args = parser.parse_args()
 
     import torch
+
     from minisgl.utils.device import get_device_type, is_npu_available, set_device
 
     if args.device != "auto":
@@ -182,14 +198,14 @@ def main():
         results.append(r)
 
         if r["status"] == "PASS":
-            print(f"  Status:  PASS")
+            print("  Status:  PASS")
             print(f"  Load:    {r['load_time']:.2f}s")
             print(f"  Prefill: {r['prefill_tps']:.1f} tok/s")
             print(f"  Decode:  {r['decode_tps']:.1f} tok/s")
             print(f"  Batch:   {r['batch_tps']:.1f} tok/s")
             print(f"  Output:  {r['output']!r}")
         else:
-            print(f"  Status:  FAIL")
+            print("  Status:  FAIL")
             print(f"  Error:   {r['error']}")
 
     # Summary
@@ -203,7 +219,9 @@ def main():
             load = f"{r['load_time']:.1f}s" if r["load_time"] else "-"
             decode = f"{r['decode_tps']:.1f} t/s" if r["decode_tps"] else "-"
             batch = f"{r['batch_tps']:.1f} t/s" if r["batch_tps"] else "-"
-            print(f"  {r['model']:<22} {r['status']:<7} {load:<7} {decode:<10} {batch:<10}")
+            print(
+                f"  {r['model']:<22} {r['status']:<7} {load:<7} {decode:<10} {batch:<10}"
+            )
 
     passed = sum(1 for r in results if r["status"] == "PASS")
     print(f"\n  Result: {passed}/{len(results)} passed")

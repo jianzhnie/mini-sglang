@@ -25,7 +25,9 @@ MODELS_ROOT = "/home/jianzhnie/llmtuner/hfhub/models"
 
 def _find_model(*names: str) -> str:
     env_root = os.environ.get("MINISGL_MODELS", "")
-    roots = [r for r in [env_root, MODELS_ROOT, str(Path.home() / "hfhub" / "models")] if r]
+    roots = [
+        r for r in [env_root, MODELS_ROOT, str(Path.home() / "hfhub" / "models")] if r
+    ]
     for name in names:
         for root in roots:
             p = Path(root) / name
@@ -43,7 +45,6 @@ def _validate(path: str) -> None:
 
 def demo_engine_scheduler(model_path: str, max_tokens: int):
     """Part 1: Direct Engine + Scheduler usage with batch generation."""
-    import torch
     from transformers import AutoTokenizer
 
     from minisgl.config import ModelArgs, SamplingParams, ServerArgs
@@ -56,9 +57,14 @@ def demo_engine_scheduler(model_path: str, max_tokens: int):
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     server_args = ServerArgs(
-        model_path=model_path, tp_size=1, attention_backend="fa",
-        max_running_req=8, max_seq_len=256, page_size=16,
-        memory_ratio=0.5, cuda_graph_bs=0,
+        model_path=model_path,
+        tp_size=1,
+        attention_backend="fa",
+        max_running_req=8,
+        max_seq_len=256,
+        page_size=16,
+        memory_ratio=0.5,
+        cuda_graph_bs=0,
     )
     model_args = ModelArgs.from_pretrained(model_path)
     engine = Engine(server_args, model_args, tp_rank=0)
@@ -78,7 +84,7 @@ def demo_engine_scheduler(model_path: str, max_tokens: int):
 
     t0 = time.perf_counter()
     while not scheduler.is_idle():
-        for uid, token_id, finished in scheduler.step():
+        for uid, token_id, _finished in scheduler.step():
             uid_map[uid]["tokens"].append(token_id)
     elapsed = time.perf_counter() - t0
 
@@ -89,8 +95,10 @@ def demo_engine_scheduler(model_path: str, max_tokens: int):
         print(f"\n  Prompt: {entry['prompt']!r}")
         print(f"  Output: {output!r}")
 
-    print(f"\n  [{len(prompts)} prompts, {total_tokens} tokens, "
-          f"{total_tokens/elapsed:.1f} tok/s, {elapsed:.2f}s]")
+    print(
+        f"\n  [{len(prompts)} prompts, {total_tokens} tokens, "
+        f"{total_tokens / elapsed:.1f} tok/s, {elapsed:.2f}s]"
+    )
     return engine, server_args, tokenizer
 
 
@@ -102,21 +110,29 @@ def demo_llm_api(model_path: str, max_tokens: int):
     print("  Part 2: LLM API (generate + chat)")
     print("=" * 60)
 
-    llm = LLM(model_path=model_path, tp_size=1, attention_backend="fa",
-              max_seq_len=256, memory_ratio=0.5)
+    llm = LLM(
+        model_path=model_path,
+        tp_size=1,
+        attention_backend="fa",
+        max_seq_len=256,
+        memory_ratio=0.5,
+    )
 
     print("\n  ── Text Completion ──")
     outputs = llm.generate(
         ["The meaning of life is", "Machine learning is"],
-        temperature=0.0, max_tokens=max_tokens,
+        temperature=0.0,
+        max_tokens=max_tokens,
     )
-    for prompt, output in zip(["The meaning of life is", "Machine learning is"], outputs):
+    for prompt, output in zip(
+        ["The meaning of life is", "Machine learning is"], outputs, strict=True
+    ):
         print(f"  {prompt!r} → {output!r}")
 
     print("\n  ── Chat ──")
     messages = [{"role": "user", "content": "What is 2+2?"}]
     response = llm.chat(messages, temperature=0.0, max_tokens=max_tokens)
-    print(f"  User: What is 2+2?")
+    print("  User: What is 2+2?")
     print(f"  Assistant: {response}")
 
     print("\n  ── Multi-turn Chat ──")
@@ -125,12 +141,12 @@ def demo_llm_api(model_path: str, max_tokens: int):
         {"role": "user", "content": "What is Python?"},
     ]
     r1 = llm.chat(conversation, temperature=0.0, max_tokens=max_tokens)
-    print(f"  User: What is Python?")
+    print("  User: What is Python?")
     print(f"  Assistant: {r1}")
     conversation.append({"role": "assistant", "content": r1})
     conversation.append({"role": "user", "content": "Who created it?"})
     r2 = llm.chat(conversation, temperature=0.0, max_tokens=max_tokens)
-    print(f"  User: Who created it?")
+    print("  User: Who created it?")
     print(f"  Assistant: {r2}")
 
     llm.cleanup()
@@ -159,13 +175,16 @@ def demo_streaming(engine, server_args, tokenizer, max_tokens: int):
     start = time.perf_counter()
     first_token_time = None
     while not scheduler.is_idle():
-        for r_uid, token_id, finished in scheduler.step():
+        for r_uid, token_id, _finished in scheduler.step():
             if r_uid == uid:
                 if first_token_time is None:
                     first_token_time = time.perf_counter() - start
                 tokens.append(token_id)
-                print(tokenizer.decode([token_id], skip_special_tokens=True),
-                      end="", flush=True)
+                print(
+                    tokenizer.decode([token_id], skip_special_tokens=True),
+                    end="",
+                    flush=True,
+                )
     total_time = time.perf_counter() - start
     print()
 
@@ -189,8 +208,14 @@ def demo_sampling(engine, server_args, tokenizer, max_tokens: int):
     strategies = [
         ("Greedy", SamplingParams(temperature=0.0, max_tokens=max_tokens)),
         ("Temp=0.7", SamplingParams(temperature=0.7, max_tokens=max_tokens)),
-        ("Temp=1.2 + Top-p=0.9", SamplingParams(temperature=1.2, top_p=0.9, max_tokens=max_tokens)),
-        ("Top-k=10 + Temp=0.8", SamplingParams(temperature=0.8, top_k=10, max_tokens=max_tokens)),
+        (
+            "Temp=1.2 + Top-p=0.9",
+            SamplingParams(temperature=1.2, top_p=0.9, max_tokens=max_tokens),
+        ),
+        (
+            "Top-k=10 + Temp=0.8",
+            SamplingParams(temperature=0.8, top_k=10, max_tokens=max_tokens),
+        ),
     ]
 
     print(f"\n  Prompt: {prompt!r}\n")

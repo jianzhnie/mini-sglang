@@ -40,8 +40,10 @@ class ServerArgs:
         if self.cuda_graph_bs is None:
             self.cuda_graph_bs = self.max_running_req
         if self.device != "auto":
-            from minisgl.utils.device import set_device
             import torch
+
+            from minisgl.utils.device import set_device
+
             set_device(torch.device(self.device))
 
 

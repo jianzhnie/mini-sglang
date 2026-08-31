@@ -27,7 +27,9 @@ EXAMPLES = [
 ]
 
 
-def run_example(script: str, model_path: str | None, timeout: int = 300) -> tuple[bool, str, float]:
+def run_example(
+    script: str, model_path: str | None, timeout: int = 300
+) -> tuple[bool, str, float]:
     cmd = [PYTHON, script]
     if model_path:
         cmd += ["--model-path", model_path]
@@ -35,8 +37,12 @@ def run_example(script: str, model_path: str | None, timeout: int = 300) -> tupl
     t0 = time.time()
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout,
-            cwd=ROOT, env=env,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=ROOT,
+            env=env,
         )
         elapsed = time.time() - t0
         output = result.stdout + result.stderr
@@ -95,7 +101,11 @@ def main():
             # Print key output lines
             for line in output.split("\n"):
                 line = line.strip()
-                if line.startswith("Output:") or line.startswith("Prompt:") or "→" in line:
+                if (
+                    line.startswith("Output:")
+                    or line.startswith("Prompt:")
+                    or "→" in line
+                ):
                     print(f"    {line}")
 
     print(f"\n{'=' * 70}")

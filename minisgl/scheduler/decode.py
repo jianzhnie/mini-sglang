@@ -48,11 +48,15 @@ class DecodeManager:
         )
         self._block_table_buf = torch.full(
             (self.max_running_req, self._max_blocks),
-            -1, dtype=torch.int32, device=self.device,
+            -1,
+            dtype=torch.int32,
+            device=self.device,
         )
         self._req_to_token_buf = torch.full(
             (self.max_running_req, self.max_seq_len),
-            -1, dtype=torch.int32, device=self.device,
+            -1,
+            dtype=torch.int32,
+            device=self.device,
         )
 
     def schedule_decode(self, running: list[Req]) -> Batch | None:

@@ -35,9 +35,10 @@ class Sampler:
         # Apply temperature
         logits = logits / temperature
 
-        # Apply top-k filtering
-        if sampling_params.top_k > 0:
-            logits = _apply_top_k(logits, sampling_params.top_k)
+        # Apply top-k filtering (clamp k to vocab size; top_k <= 0 disables it)
+        top_k = min(sampling_params.top_k, logits.shape[-1])
+        if top_k > 0:
+            logits = _apply_top_k(logits, top_k)
 
         # Apply top-p (nucleus) filtering
         if sampling_params.top_p < 1.0:
