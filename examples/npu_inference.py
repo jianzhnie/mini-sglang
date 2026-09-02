@@ -97,11 +97,11 @@ def test_model(model_path: str, max_tokens: int = 20) -> dict:
         t0 = time.perf_counter()
         ttft = None
         while not scheduler.is_idle():
-            for r_uid, token_id, _finished, _reason in scheduler.step():
-                if r_uid == uid:
+            for out in scheduler.step():
+                if out.uid == uid:
                     if ttft is None:
                         ttft = time.perf_counter() - t0
-                    tokens.append(token_id)
+                    tokens.append(out.token_id)
         total_time = time.perf_counter() - t0
 
         result["output"] = tokenizer.decode(tokens, skip_special_tokens=True)[:80]

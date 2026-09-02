@@ -101,7 +101,7 @@ class TestLinearLayers(unittest.TestCase):
 # ── Test Attention Backend ──
 class TestAttentionBackend(unittest.TestCase):
     def test_pytorch_backend(self):
-        from minisgl.models.attention.backend import AttentionBackend
+        from minisgl.models.attention.dispatcher import AttentionBackend
 
         AttentionBackend.configure("fa")  # Use FA
         q = torch.randn(1, 8, 32, 64)  # (batch, heads, seq, head_dim)
@@ -874,7 +874,7 @@ class TestSlidingWindow(unittest.TestCase):
         """PT prefill with sliding_window: query i attends keys [i-w+1, i]."""
         import torch.nn.functional as F
 
-        from minisgl.models.attention.backend import PyTorchBackend
+        from minisgl.models.attention.pt_backend import PyTorchBackend
 
         torch.manual_seed(0)
         num_heads, seq_len, head_dim, window = 2, 5, 8, 2
@@ -897,7 +897,7 @@ class TestSlidingWindow(unittest.TestCase):
         """PT decode with sliding_window: keys older than the window are masked."""
         import torch.nn.functional as F
 
-        from minisgl.models.attention.backend import PyTorchBackend
+        from minisgl.models.attention.pt_backend import PyTorchBackend
 
         torch.manual_seed(0)
         num_heads, head_dim, window = 2, 8, 3
@@ -943,7 +943,7 @@ class TestDecodeMatchesFullAttention(unittest.TestCase):
         over the whole sequence (query = last position only)."""
         import torch.nn.functional as F
 
-        from minisgl.models.attention.backend import PyTorchBackend
+        from minisgl.models.attention.pt_backend import PyTorchBackend
 
         torch.manual_seed(0)
         num_heads, head_dim, total = 4, 16, 7
@@ -1409,8 +1409,10 @@ class TestEndToEndScheduler(unittest.TestCase):
         results: dict = {}
         steps = 0
         while not scheduler.is_idle() and steps < max_steps:
-            for uid, token_id, finished, reason in scheduler.step():
-                results.setdefault(uid, []).append((token_id, finished, reason))
+            for out in scheduler.step():
+                results.setdefault(out.uid, []).append(
+                    (out.token_id, out.finished, out.finish_reason)
+                )
             steps += 1
         return results
 
@@ -1422,8 +1424,8 @@ class TestEndToEndScheduler(unittest.TestCase):
         generated = []
         steps = 0
         while not scheduler.is_idle() and steps < 100:
-            for _uid, token_id, _finished, _reason in scheduler.step():
-                generated.append(token_id)
+            for out in scheduler.step():
+                generated.append(out.token_id)
             steps += 1
         self.assertGreater(len(generated), 0)
         self.assertLessEqual(len(generated), 5)
@@ -1441,14 +1443,13 @@ class TestEndToEndScheduler(unittest.TestCase):
         results = {uid1: [], uid2: []}
         steps = 0
         while not scheduler.is_idle() and steps < 100:
-            for uid, token_id, _finished, _reason in scheduler.step():
-                results[uid].append(token_id)
+            for out in scheduler.step():
+                results[out.uid].append(out.token_id)
             steps += 1
         self.assertGreater(len(results[uid1]), 0)
         self.assertGreater(len(results[uid2]), 0)
 
     def test_eos_terminates_early(self):
-
         scheduler = self._make_engine_scheduler()
         self.assertIsInstance(scheduler.eos_token_id, set)
         self.assertIn(2, scheduler.eos_token_id)
@@ -1457,7 +1458,7 @@ class TestEndToEndScheduler(unittest.TestCase):
 # ── Test PyTorch Attention Decode Path ──
 class TestPyTorchBackendDecode(unittest.TestCase):
     def test_decode_with_valid_mask(self):
-        from minisgl.models.attention.backend import PyTorchBackend
+        from minisgl.models.attention.pt_backend import PyTorchBackend
 
         q = torch.randn(2, 4, 1, 32)
         k_cache = torch.randn(10, 16, 4, 32)
@@ -1481,7 +1482,7 @@ class TestPyTorchBackendDecode(unittest.TestCase):
         self.assertFalse(torch.isnan(out).any())
 
     def test_prefill_varlen(self):
-        from minisgl.models.attention.backend import PyTorchBackend
+        from minisgl.models.attention.pt_backend import PyTorchBackend
 
         q = torch.randn(1, 4, 8, 32)
         k = torch.randn(1, 4, 8, 32)
@@ -1497,7 +1498,7 @@ class TestPyTorchBackendDecode(unittest.TestCase):
         # causal prefill over the whole sequence.
         import torch.nn.functional as F
 
-        from minisgl.models.attention.backend import PyTorchBackend
+        from minisgl.models.attention.pt_backend import PyTorchBackend
 
         torch.manual_seed(0)
         num_heads, head_dim, page_size = 4, 32, 4
@@ -1636,21 +1637,28 @@ class TestFrontendManager(unittest.TestCase):
 
     def test_process_step_distributes_results(self):
         from minisgl.config import SamplingParams
+        from minisgl.scheduler.batch import OutputToken
 
         scheduler = self._MockScheduler()
         fm = self._make_frontend(scheduler)
         uid = fm.submit_request([1, 2, 3], SamplingParams())
 
-        scheduler.results.append((uid, 42, True, "stop"))
+        scheduler.results.append(
+            OutputToken(uid=uid, token_id=42, finished=True, finish_reason="stop")
+        )
         fm.process_step()
         self.assertEqual(fm.get_result_queue(uid).get_nowait(), (42, True, "stop"))
 
     def test_process_step_ignores_unknown_uid(self):
+        from minisgl.scheduler.batch import OutputToken
+
         scheduler = self._MockScheduler()
         fm = self._make_frontend(scheduler)
 
         # No queue registered for uid 999: must not raise (TOCTOU safety).
-        scheduler.results.append((999, 1, True, "stop"))
+        scheduler.results.append(
+            OutputToken(uid=999, token_id=1, finished=True, finish_reason="stop")
+        )
         fm.process_step()
 
     def test_stream_timeout_aborts_request(self):
@@ -1747,8 +1755,10 @@ class TestFinishReasonAndAbort(unittest.TestCase):
         uid = scheduler.add_request(list(range(100)), SamplingParams(max_tokens=4))
         results = scheduler.step()
         self.assertEqual(len(results), 1)
-        r_uid, _token_id, finished, reason = results[0]
-        self.assertEqual((r_uid, finished, reason), (uid, True, "abort"))
+        out = results[0]
+        self.assertEqual(
+            (out.uid, out.finished, out.finish_reason), (uid, True, "abort")
+        )
         self.assertTrue(scheduler.is_idle())
 
     def test_abort_pending_request(self):
@@ -1865,7 +1875,7 @@ class TestPrefillTermination(unittest.TestCase):
         scheduler = TestEndToEndScheduler._make_engine_scheduler(seed=0)
         # Probe: discover the greedy first token for this prompt.
         scheduler.add_request([5, 6, 7], SamplingParams(temperature=0.0, max_tokens=1))
-        first_token = scheduler.step()[0][1]
+        first_token = scheduler.step()[0].token_id
         self.assertTrue(scheduler.is_idle())
 
         # Make that token an EOS and re-run with a larger token budget.
@@ -2038,7 +2048,7 @@ class TestServerArgsDevice(unittest.TestCase):
         self.assertEqual(args.device, "auto")
 
     def test_attention_backend_pt(self):
-        from minisgl.models.attention.backend import AttentionBackend
+        from minisgl.models.attention.dispatcher import AttentionBackend
 
         AttentionBackend.configure("pt")
         q = torch.randn(1, 4, 8, 32)

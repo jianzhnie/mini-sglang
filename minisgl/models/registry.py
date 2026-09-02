@@ -11,7 +11,7 @@ Supports all model architectures:
 
 from __future__ import annotations
 
-__all__ = ["create_model", "detect_model_type"]
+__all__ = ["create_model", "detect_model_type", "get_remap_fn"]
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -77,6 +77,17 @@ def detect_model_type(model_path: str) -> str:
         f"Could not detect model type from architectures: {architectures}. Defaulting to qwen2.",
     )
     return "qwen2"
+
+
+def get_remap_fn(model_type: str):
+    """Return a key remapping function for the given model type."""
+    if model_type == "opt":
+
+        def _remap(name: str) -> str:
+            return name.replace("model.", "model.decoder.")
+
+        return _remap
+    return None
 
 
 def create_model(config: ModelArgs, model_type: str) -> nn.Module:

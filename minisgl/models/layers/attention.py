@@ -21,6 +21,27 @@ class BaseAttention(nn.Module):
     Subclasses must set: num_heads, num_kv_heads, head_dim, hidden_size.
     Subclasses must implement: _project_qkv(), _project_output().
     Optional hooks: _pre_rope_hook(q, k), _extra_backend_kwargs().
+
+    kwargs contract
+    ---------------
+    Callers above forward their **kwargs down a five-level chain:
+    CausalLM -> Model -> decoder layer -> BaseAttention -> attention backend.
+    Recognized keys along this chain:
+
+    - forward_mode: "prefill" or "decode".
+    - cu_seqlens_q: (num_reqs+1,) varlen query boundaries (prefill).
+    - prefix_lens: (num_reqs,) cached prefix lengths (extend prefill).
+    - block_table / req_to_token: paged-KV page tables (decode).
+    - cache_seqlens: (num_reqs,) total length including the current token.
+    - max_seqlen: batch max sequence length as a Python int (avoids .item()
+      host syncs, which are illegal during CUDA graph capture).
+    - sliding_window: band width for Mistral-style sliding-window attention.
+    - logits_indices: (num_reqs,) last-uncached-token index per request
+      (prefill runs lm_head only on these positions).
+
+    Implicit shape convention: prefill input is always a flat
+    (total_tokens, hidden) tensor; forward() unsqueezes it into a fake
+    batch=1 and squeezes the output back before returning.
     """
 
     num_local_heads: int

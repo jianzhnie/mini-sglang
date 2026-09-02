@@ -207,9 +207,7 @@ class Scheduler:
             if decode_batch is not None:
                 logits = self.engine.forward(decode_batch)
                 next_tokens = self.engine.sample(logits, decode_batch)
-                self._collect_results(
-                    decode_batch, next_tokens, results, finished_reqs
-                )
+                self._collect_results(decode_batch, next_tokens, results, finished_reqs)
 
         if finished_reqs:
             self.prefill_manager.remove_finished_batch(finished_reqs)

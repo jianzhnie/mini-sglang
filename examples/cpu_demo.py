@@ -91,9 +91,9 @@ def main() -> None:
 
             generated: list[int] = []
             while not scheduler.is_idle():
-                for _uid, token_id, finished, _reason in scheduler.step():
-                    generated.append(token_id)
-                    if finished:
+                for out in scheduler.step():
+                    generated.append(out.token_id)
+                    if out.finished:
                         break
 
             print(f"Generated:  token_ids={generated}")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from collections import defaultdict
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -27,22 +28,15 @@ from minisgl.utils.device import (
 from minisgl.utils.logger import logger
 from minisgl.utils.weights import load_hf_weights, load_weights_parallel
 
+# Teaching simplification: on CPU there is no free-memory query, so the KV
+# pool is sized against this fixed budget.
+_CPU_KV_CACHE_BYTES = 512 * 1024 * 1024  # 512 MB
+
 
 def _path_exists(path: str) -> bool:
     from pathlib import Path
 
     return Path(path).is_dir() and (Path(path) / "config.json").exists()
-
-
-def _get_remap_fn(model_type: str):
-    """Return a key remapping function for the given model type."""
-    if model_type == "opt":
-
-        def _remap(name: str) -> str:
-            return name.replace("model.", "model.decoder.")
-
-        return _remap
-    return None
 
 
 def _resolve_dtype(dtype_str: str, model_path: str, device_type: str) -> torch.dtype:
@@ -110,7 +104,7 @@ class Engine:
 
         AttentionBackend.configure(server_args.attention_backend)
 
-        self.model = self._create_model()
+        self.model, self._model_type = self._create_model()
         self.dtype = _resolve_dtype(
             server_args.dtype, server_args.model_path, self.device.type
         )
@@ -119,39 +113,8 @@ class Engine:
         # No autograd during capture/replay (or any inference forward).
         self.model.requires_grad_(False)
 
-        # Pre-build RoPE cos/sin tables on the compute device so per-layer
-        # forwards avoid host-device syncs and stay graph-capturable.
-        # RotaryEmbedding is not an nn.Module, so it never shows up in
-        # modules(); reach it via the attention modules' `rotary_emb` attr.
-        # OPT has no RoPE — the loop then simply finds nothing. prebuild()
-        # is idempotent, so per-layer instances are fine.
-        for module in self.model.modules():
-            rotary = getattr(module, "rotary_emb", None)
-            if isinstance(rotary, RotaryEmbedding):
-                rotary.prebuild(server_args.max_seq_len, self.device)
-
-        # Load weights only if model path exists
-        if server_args.model_path and _path_exists(server_args.model_path):
-            state_dict = load_hf_weights(server_args.model_path)
-            model_type = self._model_type
-            remap_fn = _get_remap_fn(model_type)
-            loaded = load_weights_parallel(
-                self.model,
-                state_dict,
-                tp_rank,
-                self.tp_size,
-                remap_fn=remap_fn,
-            )
-            logger.info("Loaded %d weights (model_type=%s)", loaded, model_type)
-            if hasattr(self.model, "tie_weights"):
-                self.model.tie_weights(state_dict)
-            # Fused-expert MoE models (e.g. Qwen3MoE) aggregate HF's
-            # per-expert weights (mlp.experts.{i}.*) into fused tensors
-            # themselves; load_weights_parallel cannot match those keys.
-            load_hf_experts = getattr(self.model, "load_hf_experts", None)
-            if load_hf_experts is not None:
-                n_expert = load_hf_experts(state_dict)
-                logger.info("Loaded %d fused expert weights", n_expert)
+        self._prebuild_rope()
+        self._load_weights()
 
         self.kv_cache_pool = self._allocate_kv_cache()
         self._assign_kv_cache()
@@ -209,12 +172,52 @@ class Engine:
         with contextlib.suppress(Exception):
             self.cleanup()
 
-    def _create_model(self) -> torch.nn.Module:
+    def _create_model(self) -> tuple[torch.nn.Module, str]:
+        """Create the model and return it together with its detected type."""
         from minisgl.models.registry import create_model, detect_model_type
 
         model_type = detect_model_type(self.server_args.model_path)
-        self._model_type = model_type
-        return create_model(self.model_args, model_type)
+        return create_model(self.model_args, model_type), model_type
+
+    def _prebuild_rope(self) -> None:
+        # Pre-build RoPE cos/sin tables on the compute device so per-layer
+        # forwards avoid host-device syncs and stay graph-capturable.
+        # RotaryEmbedding is not an nn.Module, so it never shows up in
+        # modules(); reach it via the attention modules' `rotary_emb` attr.
+        # OPT has no RoPE — the loop then simply finds nothing. prebuild()
+        # is idempotent, so per-layer instances are fine.
+        for module in self.model.modules():
+            rotary = getattr(module, "rotary_emb", None)
+            if isinstance(rotary, RotaryEmbedding):
+                rotary.prebuild(self.server_args.max_seq_len, self.device)
+
+    def _load_weights(self) -> None:
+        """Load HF weights from the model path, if it exists on disk."""
+        from minisgl.models.registry import get_remap_fn
+
+        model_path = self.server_args.model_path
+        if not (model_path and _path_exists(model_path)):
+            return
+        state_dict = load_hf_weights(model_path)
+        model_type = self._model_type
+        remap_fn = get_remap_fn(model_type)
+        loaded = load_weights_parallel(
+            self.model,
+            state_dict,
+            self.tp_rank,
+            self.tp_size,
+            remap_fn=remap_fn,
+        )
+        logger.info("Loaded %d weights (model_type=%s)", loaded, model_type)
+        if hasattr(self.model, "tie_weights"):
+            self.model.tie_weights(state_dict)
+        # Fused-expert MoE models (e.g. Qwen3MoE) aggregate HF's
+        # per-expert weights (mlp.experts.{i}.*) into fused tensors
+        # themselves; load_weights_parallel cannot match those keys.
+        load_hf_experts = getattr(self.model, "load_hf_experts", None)
+        if load_hf_experts is not None:
+            n_expert = load_hf_experts(state_dict)
+            logger.info("Loaded %d fused expert weights", n_expert)
 
     def _allocate_kv_cache(self) -> KVCachePool:
         """Allocate KV cache based on available accelerator memory."""
@@ -226,7 +229,7 @@ class Engine:
             used_mem = total_mem - free_mem
             available_mem = int(total_mem * args.memory_ratio - used_mem)
         else:
-            available_mem = 512 * 1024 * 1024  # 512 MB for CPU
+            available_mem = _CPU_KV_CACHE_BYTES
 
         dtype_itemsize = self.model.lm_head.weight.dtype.itemsize
         # Match the attention modules: replicate KV heads when num_kv_heads
@@ -266,16 +269,27 @@ class Engine:
         self.k_cache = k_all
         self.v_cache = v_all
 
+    def _run_model(self, *, forward_mode: str, **kwargs) -> torch.Tensor:
+        """Single entry point for model forward.
+
+        Supplies k_cache/v_cache and the forward mode; callers pass only the
+        metadata fields their phase needs (prefill vs decode vs graph capture).
+        """
+        return self.model(
+            k_cache=self.k_cache,
+            v_cache=self.v_cache,
+            forward_mode=forward_mode,
+            **kwargs,
+        )
+
     def forward(self, batch: Batch) -> torch.Tensor:
         """Run model forward pass on a batch."""
         if batch.phase == "prefill":
             self.batch_context.prepare(batch)
             with torch.inference_mode():
-                return self.model(
+                return self._run_model(
                     input_ids=batch.input_ids,
                     positions=batch.positions,
-                    k_cache=self.k_cache,
-                    v_cache=self.v_cache,
                     write_loc=batch.write_loc,
                     cu_seqlens_q=batch.cu_seqlens_q,
                     req_to_token=batch.req_to_token,
@@ -310,11 +324,9 @@ class Engine:
                 return outs[:bs].clone()
         else:
             with torch.inference_mode():
-                return self.model(
+                return self._run_model(
                     input_ids=batch.input_ids,
                     positions=batch.positions,
-                    k_cache=self.k_cache,
-                    v_cache=self.v_cache,
                     write_loc=batch.write_loc,
                     cache_seqlens=batch.cache_seqlens,
                     block_table=batch.block_table,
@@ -335,16 +347,15 @@ class Engine:
 
         Groups requests with identical sampling params for batched sampling.
         """
-        if batch.phase == "decode":
-            if logits.dim() == 3 and logits.shape[1] == 1:
-                logits = logits.squeeze(1)  # (num_reqs, vocab_size)
-            elif logits.dim() == 1:
-                logits = logits.unsqueeze(0)  # (1, vocab_size)
-            return self._sample_batched(logits, batch.reqs)
-
-        # Prefill: forward already gathered each request's last-position
-        # logits via logits_indices — logits is (num_reqs, vocab_size),
-        # one row per request, in request order.
+        # Normalize to (num_reqs, vocab_size): decode may produce
+        # (num_reqs, 1, vocab_size) or, for a single request, (vocab_size,).
+        # Prefill already yields (num_reqs, vocab_size) — forward gathered each
+        # request's last-position logits via logits_indices, so the
+        # normalization below is a no-op for it.
+        if logits.dim() == 3 and logits.shape[1] == 1:
+            logits = logits.squeeze(1)  # (num_reqs, vocab_size)
+        elif logits.dim() == 1:
+            logits = logits.unsqueeze(0)  # (1, vocab_size)
         return self._sample_batched(logits, batch.reqs)
 
     def _sample_batched(self, logits: torch.Tensor, reqs: list) -> list:
@@ -354,8 +365,6 @@ class Engine:
         """
         if all(req.sampling_params.temperature <= 0.0 for req in reqs):
             return logits.argmax(dim=-1).tolist()
-
-        from collections import defaultdict
 
         groups: dict[tuple, list[int]] = defaultdict(list)
         for i, req in enumerate(reqs):
@@ -450,11 +459,9 @@ class Engine:
         )
 
         def run_decode() -> torch.Tensor:
-            return self.model(
+            return self._run_model(
                 input_ids=input_ids,
                 positions=positions,
-                k_cache=self.k_cache,
-                v_cache=self.v_cache,
                 write_loc=write_loc,
                 cache_seqlens=cache_seqlens,
                 block_table=block_table,
