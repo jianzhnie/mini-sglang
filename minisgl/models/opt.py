@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from minisgl.models.decoder import gather_last_logits
 from minisgl.models.layers.attention import BaseAttention
 from minisgl.models.layers.embedding import VocabParallelEmbedding
 from minisgl.models.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -221,12 +222,7 @@ class OPTForCausalLM(nn.Module):
             input_ids, positions, k_cache, v_cache, write_loc, **kwargs
         )
         if logits_indices is not None:
-            # Prefill fast path: sampling only consumes the last uncached
-            # token of each request, so gather those rows and run the (very
-            # expensive) full-vocab lm_head projection on them alone.
-            if hidden_states.dim() == 3:
-                hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-            hidden_states = hidden_states[logits_indices]
+            hidden_states = gather_last_logits(hidden_states, logits_indices)
         return self.lm_head(hidden_states)
 
     def tie_weights(self, state_dict: dict) -> None:

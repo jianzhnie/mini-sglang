@@ -115,10 +115,9 @@ class FrontendManager:
         while self._running:
             try:
                 if self.scheduler.is_idle():
-                    time.sleep(0.01)
+                    time.sleep(0.01)  # avoid a busy spin while idle
                     continue
                 self.process_step()
-                time.sleep(0.001)
             except Exception as exc:
                 logger.error("Scheduler event loop error: %s", exc)
 
@@ -256,47 +255,22 @@ async def chat_completions(request: ChatCompletionRequest):
 
 def _stream_chat_response(uid: int, result_queue: queue.Queue, model: str):
     """SSE streaming generator for chat completions (sync, runs in thread pool)."""
-    detok = IncrementalDetokenizer(_frontend.tokenizer)
-    try:
-        while True:
-            token_id, finished, finish_reason = result_queue.get(
-                timeout=REQUEST_TIMEOUT
-            )
-            if finish_reason == "abort":
-                yield _error_chunk("Request aborted by the scheduler")
-                break
-            chunk = {
-                "id": f"chatcmpl-{uid}",
-                "object": "chat.completion.chunk",
-                "model": model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"content": detok.add_token(token_id)},
-                        "finish_reason": finish_reason if finished else None,
-                    }
-                ],
-            }
-            yield f"data: {json.dumps(chunk, ensure_ascii=True)}\n\n"
-
-            if finished:
-                break
-    except queue.Empty:
-        logger.warning(
-            "Streaming request %s timed out after %ss; aborting", uid, REQUEST_TIMEOUT
-        )
-        _frontend.scheduler.abort_request(uid)
-        yield _error_chunk("Timed out waiting for the next token")
-    except GeneratorExit:
-        # Client disconnected; make sure the request does not run forever.
-        _frontend.scheduler.abort_request(uid)
-        raise
-    except Exception as exc:
-        logger.warning("Streaming request %s failed: %s", uid, exc)
-        yield _error_chunk(str(exc))
-    finally:
-        _frontend.remove_result(uid)
-    yield "data: [DONE]\n\n"
+    return _stream_response(
+        uid,
+        result_queue,
+        lambda content, finished, reason: {
+            "id": f"chatcmpl-{uid}",
+            "object": "chat.completion.chunk",
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": content},
+                    "finish_reason": reason if finished else None,
+                }
+            ],
+        },
+    )
 
 
 @app.post("/v1/completions")
@@ -335,6 +309,26 @@ async def completions(request: CompletionRequest):
 
 def _stream_completion_response(uid: int, result_queue: queue.Queue, model: str):
     """SSE streaming generator for completions (sync, runs in thread pool)."""
+    return _stream_response(
+        uid,
+        result_queue,
+        lambda content, finished, reason: {
+            "id": f"cmpl-{uid}",
+            "object": "text_completion",
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "text": content,
+                    "finish_reason": reason if finished else None,
+                }
+            ],
+        },
+    )
+
+
+def _stream_response(uid: int, result_queue: queue.Queue, make_chunk):
+    """Shared SSE streaming core; ``make_chunk`` shapes the per-API chunk dict."""
     detok = IncrementalDetokenizer(_frontend.tokenizer)
     try:
         while True:
@@ -344,18 +338,7 @@ def _stream_completion_response(uid: int, result_queue: queue.Queue, model: str)
             if finish_reason == "abort":
                 yield _error_chunk("Request aborted by the scheduler")
                 break
-            chunk = {
-                "id": f"cmpl-{uid}",
-                "object": "text_completion",
-                "model": model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "text": detok.add_token(token_id),
-                        "finish_reason": finish_reason if finished else None,
-                    }
-                ],
-            }
+            chunk = make_chunk(detok.add_token(token_id), finished, finish_reason)
             yield f"data: {json.dumps(chunk, ensure_ascii=True)}\n\n"
 
             if finished:

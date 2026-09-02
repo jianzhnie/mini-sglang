@@ -108,7 +108,7 @@ class TestAttentionBackend(unittest.TestCase):
         k = torch.randn(1, 8, 32, 64)
         v = torch.randn(1, 8, 32, 64)
         # Should not raise
-        out = AttentionBackend.forward(q, k, v)
+        out = AttentionBackend.forward(q, k, v, forward_mode="prefill")
         self.assertEqual(out.shape, q.shape)
 
 
@@ -118,7 +118,7 @@ class TestSampler(unittest.TestCase):
         from minisgl.config import SamplingParams
         from minisgl.sampling.sampler import Sampler
 
-        sampler = Sampler(1000)
+        sampler = Sampler()
         logits = torch.randn(4, 1000)  # 4 requests, 1000 vocab
         params = SamplingParams(temperature=0.0)  # greedy
         tokens = sampler.sample(logits, params)
@@ -131,7 +131,7 @@ class TestSampler(unittest.TestCase):
         from minisgl.config import SamplingParams
         from minisgl.sampling.sampler import Sampler
 
-        sampler = Sampler(1000)
+        sampler = Sampler()
         logits = torch.randn(4, 1000)
         params = SamplingParams(temperature=0.8, top_k=50, top_p=0.9)
         tokens = sampler.sample(logits, params)
@@ -210,9 +210,6 @@ class TestKVCachePool(unittest.TestCase):
             dtype=torch.float32,
             device=torch.device("cpu"),
         )
-        k, v = pool.get_kv_cache(layer_idx=0)
-        self.assertEqual(k.shape, (20, 16, 4, 32))
-        self.assertEqual(v.shape, (20, 16, 4, 32))
         k_all, v_all = pool.get_all_kv_cache()
         self.assertEqual(k_all.shape, (4, 20, 16, 4, 32))
         self.assertEqual(v_all.shape, (4, 20, 16, 4, 32))
@@ -293,9 +290,9 @@ class TestSchedulerBatch(unittest.TestCase):
             sampling_params=SamplingParams(max_tokens=100),
         )
         batch = Batch(reqs=[req], phase="prefill")
-        self.assertEqual(batch.size(), 1)
+        self.assertEqual(len(batch.reqs), 1)
         self.assertEqual(batch.phase, "prefill")
-        self.assertEqual(req.total_len, 5)
+        self.assertEqual(len(req.input_ids), 5)
         self.assertEqual(req.uncached_len, 5)
         self.assertFalse(req.is_finished)
 
@@ -311,7 +308,7 @@ class TestSchedulerBatch(unittest.TestCase):
         self.assertEqual(req.status, SequenceStatus.WAITING)
         req.status = SequenceStatus.RUNNING
         req.append_token(42)
-        self.assertEqual(req.total_len, 4)
+        self.assertEqual(len(req.input_ids), 4)
         self.assertEqual(req.output_len, 1)
 
     def test_context_prepare(self):
@@ -1330,18 +1327,6 @@ class TestSharedDecoder(unittest.TestCase):
 
         self.assertTrue(issubclass(LlamaForCausalLM, RMSNormForCausalLM))
 
-    def test_mlp_alias(self):
-        from minisgl.models.decoder import GatedMLP
-        from minisgl.models.llama import LlamaMLP
-        from minisgl.models.mistral import MistralMLP
-        from minisgl.models.qwen2 import Qwen2MLP
-        from minisgl.models.qwen3 import Qwen3MLP
-
-        self.assertIs(LlamaMLP, GatedMLP)
-        self.assertIs(Qwen2MLP, GatedMLP)
-        self.assertIs(Qwen3MLP, GatedMLP)
-        self.assertIs(MistralMLP, GatedMLP)
-
 
 # ── Test End-to-End Scheduler Loop ──
 class TestEndToEndScheduler(unittest.TestCase):
@@ -1564,7 +1549,7 @@ class TestSamplerEdgeCases(unittest.TestCase):
         from minisgl.config import SamplingParams
         from minisgl.sampling.sampler import Sampler
 
-        sampler = Sampler(100)
+        sampler = Sampler()
         logits = torch.randn(1, 100)
         params = SamplingParams(temperature=0.0)
         tokens = sampler.sample(logits, params)
@@ -1582,7 +1567,7 @@ class TestSamplerEdgeCases(unittest.TestCase):
         from minisgl.config import SamplingParams
         from minisgl.sampling.sampler import Sampler
 
-        sampler = Sampler(100)
+        sampler = Sampler()
         logits = torch.randn(4, 100)
         params = SamplingParams(temperature=0.01)
         tokens = sampler.sample(logits, params)

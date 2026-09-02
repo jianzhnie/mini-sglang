@@ -10,8 +10,7 @@ class RMSNorm(nn.Module):
 
 
     When residual is provided: out, new_residual = rms_norm(x + residual)
-    When residual is None: out, new_residual = rms_norm(x)
-    Always returns a (normalized, residual) tuple for consistent API.
+    When residual is None: out = rms_norm(x), new_residual = None
     """
 
     def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
@@ -29,7 +28,7 @@ class RMSNorm(nn.Module):
         if residual is not None:
             x = x + residual
 
-        new_residual = x.detach() if residual is not None else None
+        new_residual = x if residual is not None else None
 
         x_fp32 = x.float()
         variance = x_fp32.pow(2).mean(-1, keepdim=True)

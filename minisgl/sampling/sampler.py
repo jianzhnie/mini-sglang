@@ -10,9 +10,6 @@ from minisgl.config import SamplingParams
 class Sampler:
     """Token sampler supporting greedy, top-k, top-p, and temperature sampling."""
 
-    def __init__(self, vocab_size: int) -> None:
-        self.vocab_size = vocab_size
-
     def sample(
         self,
         logits: torch.Tensor,  # (batch_size, vocab_size)

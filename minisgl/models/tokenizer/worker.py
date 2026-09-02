@@ -20,9 +20,6 @@ class TokenizerWorker:
             model_path,
             trust_remote_code=trust_remote_code,
         )
-        # Keep the tokenizer's own eos_token_id as-is (may be None); the
-        # Scheduler has its own EOS fallback logic and handles None.
-        self.eos_token_id = self.tokenizer.eos_token_id
 
     def encode(self, text: str) -> list[int]:
         """Encode text to token IDs."""

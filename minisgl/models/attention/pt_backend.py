@@ -39,12 +39,8 @@ class PyTorchBackend:
 
         forward_mode = kwargs.get("forward_mode")
         if forward_mode is None:
-            # Legacy callers (e.g. CUDA graph capture) don't pass a mode.
-            forward_mode = (
-                "decode"
-                if (seq_len == 1 and k_cache is not None and v_cache is not None)
-                else "prefill"
-            )
+            msg = "PyTorchBackend requires an explicit forward_mode ('prefill' or 'decode')"
+            raise ValueError(msg)
 
         if forward_mode == "decode":
             return PyTorchBackend._decode_with_cache(

@@ -42,10 +42,6 @@ class Req:
     status: SequenceStatus = SequenceStatus.WAITING
 
     @property
-    def total_len(self) -> int:
-        return len(self.input_ids)
-
-    @property
     def uncached_len(self) -> int:
         return len(self.input_ids) - self.cached_len
 
@@ -81,6 +77,3 @@ class Batch:
     # len; decode: max total len). Lets attention backends avoid .item()
     # host syncs, which are also illegal during CUDA graph capture.
     max_seqlen: int | None = None
-
-    def size(self) -> int:
-        return len(self.reqs)

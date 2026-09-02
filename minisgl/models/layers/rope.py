@@ -5,23 +5,17 @@ import torch
 
 
 class RotaryEmbedding:
-    """Manages precomputed cos/sin tables for rotary position embeddings.
-
-
-    Supports dynamic sequence length extension.
-    """
+    """Manages precomputed cos/sin tables for rotary position embeddings."""
 
     def __init__(
         self,
         head_dim: int,
         max_position_embeddings: int = 8192,
         rope_theta: float = 10000.0,
-        use_dynamic_ntk: bool = False,
     ) -> None:
         self.head_dim = head_dim
         self.max_position_embeddings = max_position_embeddings
         self.rope_theta = rope_theta
-        self.use_dynamic_ntk = use_dynamic_ntk
 
         # Precompute cos/sin tables
         self._cos_table: torch.Tensor | None = None
@@ -88,6 +82,10 @@ class RotaryEmbedding:
         sin = self._sin_table[:, :, pos, :].to(dtype=q.dtype)
 
         if cos.dim() == 4 and cos.shape[2] > 1 and q.shape[2] == 1:
+            # Decode shape: q is (batch, heads, 1, head_dim) but positions is
+            # (num_reqs,) — one position per request, not per seq slot. Indexing
+            # produced (1, 1, num_reqs, head_dim); move the position axis to the
+            # front so cos/sin broadcast as (num_reqs, 1, 1, head_dim).
             cos = cos.permute(2, 0, 1, 3)
             sin = sin.permute(2, 0, 1, 3)
 

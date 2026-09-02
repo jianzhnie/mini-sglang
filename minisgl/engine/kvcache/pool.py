@@ -58,7 +58,7 @@ class KVCachePool:
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
 
-        # (2, num_layers, num_pages, page_size, num_heads, head_dim)
+        # (2, num_layers, num_pages, page_size, num_kv_heads, head_dim)
         self.buffer = torch.empty(
             2,
             num_layers,
@@ -102,10 +102,6 @@ class KVCachePool:
 
     def free_count(self) -> int:
         return len(self.free_pages)
-
-    def get_kv_cache(self, layer_idx: int) -> tuple:
-        """Get (k_cache, v_cache) tensors for a specific layer."""
-        return self.buffer[0, layer_idx], self.buffer[1, layer_idx]
 
     def get_all_kv_cache(self) -> tuple:
         """Get full (k_cache, v_cache) tensors (all layers)."""

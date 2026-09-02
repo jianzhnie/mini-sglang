@@ -12,6 +12,7 @@ Supports all model architectures:
 from __future__ import annotations
 
 __all__ = ["create_model", "detect_model_type", "get_remap_fn"]
+import importlib
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -111,8 +112,6 @@ def create_model(config: ModelArgs, model_type: str) -> nn.Module:
         raise ValueError(msg)
 
     module_path, class_name = entry
-    import importlib
-
     module = importlib.import_module(module_path)
     model_cls = getattr(module, class_name)
     logger.info("Creating model: %s (type=%s)", model_cls.__name__, model_type)

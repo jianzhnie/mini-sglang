@@ -9,6 +9,7 @@ __all__ = [
     "RMSNormDecoderLayer",
     "RMSNormModel",
     "RMSNormForCausalLM",
+    "gather_last_logits",
 ]
 import torch
 import torch.nn as nn
@@ -32,6 +33,20 @@ class GatedMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.down_proj(nn.functional.silu(self.gate_proj(x)) * self.up_proj(x))
+
+
+def gather_last_logits(
+    hidden: torch.Tensor, logits_indices: torch.Tensor
+) -> torch.Tensor:
+    """Gather the hidden rows that feed the lm_head.
+
+    Prefill fast path: sampling only consumes the last uncached token of
+    each request, so gather those rows and run the (very expensive)
+    full-vocab lm_head projection on them alone.
+    """
+    if hidden.dim() == 3:
+        hidden = hidden.view(-1, hidden.shape[-1])
+    return hidden[logits_indices]
 
 
 class RMSNormDecoderLayer(nn.Module):
@@ -73,12 +88,9 @@ class RMSNormDecoderLayer(nn.Module):
         attn_out = self.self_attn(
             hidden_states, positions, k_cache, v_cache, write_loc, **kwargs
         )
-        hidden_states = attn_out + residual
-
-        residual = hidden_states
-        hidden_states, _ = self.post_attention_layernorm(hidden_states)
-        mlp_out = self.mlp(hidden_states)
-        return mlp_out + residual
+        # Fused add: normalizes attn_out + residual and returns the new residual.
+        hidden_states, residual = self.post_attention_layernorm(attn_out, residual)
+        return self.mlp(hidden_states) + residual
 
 
 class RMSNormModel(nn.Module):
@@ -168,12 +180,7 @@ class RMSNormForCausalLM(nn.Module):
             input_ids, positions, k_cache, v_cache, write_loc, **kwargs
         )
         if logits_indices is not None:
-            # Prefill fast path: sampling only consumes the last uncached
-            # token of each request, so gather those rows and run the (very
-            # expensive) full-vocab lm_head projection on them alone.
-            if hidden_states.dim() == 3:
-                hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-            hidden_states = hidden_states[logits_indices]
+            hidden_states = gather_last_logits(hidden_states, logits_indices)
         return self.lm_head(hidden_states)
 
     def tie_weights(self, state_dict: dict) -> None:

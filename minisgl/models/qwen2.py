@@ -3,7 +3,7 @@
 Qwen2ForCausalLM architecture:
 - Embedding + Decoder Layers + RMSNorm + LM Head
 - Gated MLP (SwiGLU): gate_proj, up_proj, down_proj
-- Standard attention with RoPE and bias on Q/K projections
+- Standard attention with RoPE and bias on Q/K/V projections
 """
 
 __all__ = [
@@ -12,21 +12,15 @@ __all__ = [
 ]
 import torch
 
-from minisgl.models.decoder import (
-    GatedMLP,
-    RMSNormForCausalLM,
-    RMSNormModel,
-)
+from minisgl.models.decoder import RMSNormForCausalLM, RMSNormModel
 from minisgl.models.layers.attention import BaseAttention
 from minisgl.models.layers.linear import ColumnParallelLinear, RowParallelLinear
 from minisgl.models.layers.rope import RotaryEmbedding
 from minisgl.utils.device import get_tp_size
 
-Qwen2MLP = GatedMLP
-
 
 class Qwen2Attention(BaseAttention):
-    """Multi-head attention for Qwen2 with RoPE and bias on Q/K projections."""
+    """Multi-head attention for Qwen2 with RoPE and bias on Q/K/V projections."""
 
     def __init__(self, config) -> None:
         super().__init__()

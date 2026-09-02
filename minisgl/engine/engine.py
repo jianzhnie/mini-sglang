@@ -126,7 +126,7 @@ class Engine:
             self.device,
         )
 
-        self.sampler = Sampler(model_args.vocab_size)
+        self.sampler = Sampler()
 
         self._graphs: dict[int, object] = {}
         self._graph_inputs: dict[int, dict] = {}

@@ -163,6 +163,5 @@ class LLM:
             top_p=top_p,
             max_tokens=max_tokens,
         )
-        if single_input:
-            return results[0] if isinstance(results, list) else results
-        return results
+        # generate() receives a list here, so results is always list[str].
+        return results[0] if single_input else results

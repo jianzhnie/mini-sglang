@@ -18,7 +18,6 @@ class VocabParallelEmbedding(nn.Module):
         self.vocab_start = tp_rank * (num_embeddings // tp_size)
         self.vocab_end = (tp_rank + 1) * (num_embeddings // tp_size)
         self.num_embeddings_per_rank = num_embeddings // tp_size
-        self.original_vocab_size = num_embeddings
 
         self.weight = nn.Parameter(
             torch.empty(self.num_embeddings_per_rank, embedding_dim),
