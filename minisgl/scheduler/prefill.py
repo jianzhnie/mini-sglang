@@ -110,6 +110,23 @@ class PrefillManager:
             self.running.extend(scheduled)
             return Batch(reqs=scheduled, phase="prefill")
 
+    def abort(self, uid: int) -> bool:
+        """Abort a pending or running request by UID, releasing its resources.
+
+        Returns True if the request was found and aborted, False otherwise.
+        """
+        with self._lock:
+            for queue_ in (self.pending, self.running):
+                for req in queue_:
+                    if req.uid == uid:
+                        req.status = SequenceStatus.FINISHED
+                        with contextlib.suppress(ValueError):
+                            queue_.remove(req)
+                        self._remove_finished_nolock(req)
+                        logger.info("Aborted request %s", uid)
+                        return True
+        return False
+
     def _pages_needed(self, req: Req, matched_len: int) -> int:
         """Pages to allocate for the uncached suffix [matched_len, upper)."""
         upper = min(

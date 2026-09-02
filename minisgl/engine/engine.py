@@ -14,7 +14,7 @@ import torch
 
 from minisgl.engine.context import BatchContext
 from minisgl.engine.kvcache.pool import BaseCacheHandle, KVCachePool
-from minisgl.models.attention.backend import AttentionBackend
+from minisgl.models.attention.dispatcher import AttentionBackend
 from minisgl.models.layers.rope import RotaryEmbedding
 from minisgl.sampling.sampler import Sampler
 from minisgl.utils.device import (

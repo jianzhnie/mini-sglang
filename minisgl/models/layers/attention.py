@@ -12,7 +12,7 @@ __all__ = ["BaseAttention"]
 import torch
 import torch.nn as nn
 
-from minisgl.models.attention.backend import AttentionBackend
+from minisgl.models.attention.dispatcher import AttentionBackend
 
 
 class BaseAttention(nn.Module):

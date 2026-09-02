@@ -104,10 +104,10 @@ class FrontendManager:
         # Hold the lock while distributing: remove_result() may run
         # concurrently from a streaming generator's finally block.
         with self._lock:
-            for uid, token_id, finished, finish_reason in step_results:
-                q = self._results.get(uid)
+            for out in step_results:
+                q = self._results.get(out.uid)
                 if q is not None:
-                    q.put((token_id, finished, finish_reason))
+                    q.put((out.token_id, out.finished, out.finish_reason))
 
     def run_event_loop(self) -> None:
         """Background thread running the scheduler loop."""

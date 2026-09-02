@@ -19,7 +19,11 @@ class SamplingParams:
 
 @dataclass
 class ServerArgs:
-    """Server and engine configuration parsed from CLI / env."""
+    """Server and engine configuration parsed from CLI / env.
+
+    Side effect: when ``device`` is not ``"auto"``, ``__post_init__`` calls
+    ``minisgl.utils.device.set_device`` and mutates the global device state.
+    """
 
     model_path: str = ""
     host: str = "127.0.0.1"
@@ -35,6 +39,7 @@ class ServerArgs:
     device: str = "auto"
     trust_remote_code: bool = False
     shell: bool = False
+    log_level: str = "INFO"
 
     def __post_init__(self) -> None:
         if self.cuda_graph_bs is None:

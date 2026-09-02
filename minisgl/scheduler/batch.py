@@ -1,6 +1,6 @@
 """Sequence (request) and Batch data structures for the scheduler."""
 
-__all__ = ["Batch", "Req", "SequenceStatus"]
+__all__ = ["Batch", "OutputToken", "Req", "SequenceStatus"]
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Literal
@@ -15,6 +15,18 @@ class SequenceStatus(Enum):
     WAITING = auto()
     RUNNING = auto()
     FINISHED = auto()
+
+
+@dataclass(slots=True)
+class OutputToken:
+    """One generated token reported by Scheduler.step()."""
+
+    uid: int
+    token_id: int
+    finished: bool
+    # None while in progress; "stop" / "length" / "abort" on the final token
+    # ("abort" means token_id is meaningless).
+    finish_reason: str | None = None
 
 
 @dataclass(slots=True)

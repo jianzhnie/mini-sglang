@@ -115,14 +115,14 @@ class LLM:
             if not step_results:
                 time.sleep(0.0001)  # yield CPU when idle
                 continue
-            for uid, token_id, finished, finish_reason in step_results:
-                if uid in pending_uids:
-                    idx = uid_to_idx[uid]
+            for out in step_results:
+                if out.uid in pending_uids:
+                    idx = uid_to_idx[out.uid]
                     # Aborted requests carry a meaningless token_id.
-                    if finish_reason != "abort":
-                        output_ids[idx].append(token_id)
-                    if finished:
-                        pending_uids.discard(uid)
+                    if out.finish_reason != "abort":
+                        output_ids[idx].append(out.token_id)
+                    if out.finished:
+                        pending_uids.discard(out.uid)
 
         # Decode the full token list at once: per-token decode would corrupt
         # multi-byte UTF-8 characters split across tokens.
