@@ -30,8 +30,10 @@ class DecodeManager:
         self.device = device or torch.device("cpu")
         self._max_blocks = (self.max_seq_len + self.page_size - 1) // self.page_size
 
-        self._page_offsets = torch.arange(
-            self.page_size, dtype=torch.int32, device=self.device
+        # Column indices for the vectorized req_to_token row fill: column c of
+        # a row holds page_ids[c // page_size] * page_size + c % page_size.
+        self._cols_buf = torch.arange(
+            self.max_seq_len, dtype=torch.int32, device=self.device
         )
 
         self._input_ids_buf = torch.zeros(
@@ -106,21 +108,21 @@ class DecodeManager:
                 else:
                     self._write_loc_buf[i] = -1
 
-                for j, pid in enumerate(handle.page_ids):
-                    if j >= self._max_blocks:
-                        break
-                    self._block_table_buf[i, j] = pid
+                pages = torch.tensor(
+                    handle.page_ids, dtype=torch.int32, device=self.device
+                )
+                n_blocks = min(len(handle.page_ids), self._max_blocks)
+                self._block_table_buf[i, :n_blocks] = pages[:n_blocks]
 
-                pages = handle.page_ids
-                for p_idx, page_id in enumerate(pages):
-                    start = p_idx * self.page_size
-                    if start >= total_len:
-                        break
-                    end = min((p_idx + 1) * self.page_size, total_len)
-                    count = end - start
-                    self._req_to_token_buf[i, start:end] = (
-                        page_id * self.page_size + self._page_offsets[:count]
-                    )
+                # Vectorized row fill into the pre-allocated buffer (same
+                # trick as BatchContext._build_req_to_token): column c holds
+                # page_ids[c // page_size] * page_size + c % page_size.
+                n_filled = min(total_len, len(handle.page_ids) * self.page_size)
+                cols = self._cols_buf[:n_filled]
+                self._req_to_token_buf[i, :n_filled] = (
+                    pages[cols // self.page_size] * self.page_size
+                    + cols % self.page_size
+                )
             else:
                 self._write_loc_buf[i] = -1
 

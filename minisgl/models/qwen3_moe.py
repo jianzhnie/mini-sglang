@@ -106,10 +106,11 @@ class Qwen3MoEMLP(nn.Module):
         total_tokens, hidden_dim = x.shape
         output = torch.zeros(total_tokens, hidden_dim, dtype=x.dtype, device=x.device)
 
-        for expert_idx in range(self.num_experts):
+        # One host sync per forward: which experts are actually selected this
+        # step. Experts outside this list have no tokens and are skipped
+        # without a per-expert mask.any() sync.
+        for expert_idx in selected_experts.unique().tolist():
             mask = (selected_experts == expert_idx).any(dim=-1)
-            if not mask.any():
-                continue
 
             tokens_for_expert = x[mask]
             weight_idx = (selected_experts[mask] == expert_idx).nonzero(as_tuple=True)[

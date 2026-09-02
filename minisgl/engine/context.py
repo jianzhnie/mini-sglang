@@ -45,7 +45,7 @@ class BatchContext:
 
         all_input_ids = []
         all_positions = []
-        write_loc = []
+        write_loc_parts = []
         seq_lengths = []
         # Per-request index of the last uncached token in the flat batch.
         # Prefill only needs lm_head logits at these positions.
@@ -63,16 +63,23 @@ class BatchContext:
             offset += len(uncached_tokens)
 
             if req.cache_handle:
-                pages = req.cache_handle.page_ids
-                for pos in range(start_pos, end_pos):
-                    page_idx = pos // self.page_size
-                    if page_idx < len(pages):
-                        loc = pages[page_idx] * self.page_size + (pos % self.page_size)
-                        write_loc.append(loc)
-                    else:
-                        write_loc.append(-1)
+                # Vectorized write_loc (same trick as _build_req_to_token):
+                # position p maps to page_ids[p // ps] * ps + p % ps, with the
+                # -1 sentinel kept for positions beyond the allocated pages.
+                pages = torch.tensor(req.cache_handle.page_ids, dtype=torch.int32)
+                pos = torch.arange(start_pos, end_pos, dtype=torch.int32)
+                page_idx = pos // self.page_size
+                valid = page_idx < len(pages)
+                locs = torch.full_like(pos, -1)
+                locs[valid] = (
+                    pages[page_idx[valid]] * self.page_size
+                    + pos[valid] % self.page_size
+                )
+                write_loc_parts.append(locs)
             else:
-                write_loc.extend([-1] * req.uncached_len)
+                write_loc_parts.append(
+                    torch.full((req.uncached_len,), -1, dtype=torch.int32)
+                )
 
         batch.input_ids = torch.tensor(all_input_ids, dtype=torch.long).to(
             self.device, non_blocking=True
@@ -81,8 +88,8 @@ class BatchContext:
             self.device, non_blocking=True
         )
 
-        if write_loc:
-            batch.write_loc = torch.tensor(write_loc, dtype=torch.int32).to(
+        if write_loc_parts:
+            batch.write_loc = torch.cat(write_loc_parts).to(
                 self.device, non_blocking=True
             )
 

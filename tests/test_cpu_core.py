@@ -512,7 +512,9 @@ class TestModelDummy(unittest.TestCase):
         positions = torch.arange(8)
 
         with torch.inference_mode():
-            logits = model(input_ids=input_ids, positions=positions)
+            logits = model(
+                input_ids=input_ids, positions=positions, forward_mode="prefill"
+            )
 
         self.assertEqual(logits.shape, (1, 8, 1000))
 
@@ -540,7 +542,9 @@ class TestModelDummy(unittest.TestCase):
         input_ids = torch.randint(0, 1000, (1, 8))
         positions = torch.arange(8)
         with torch.inference_mode():
-            logits = model(input_ids=input_ids, positions=positions)
+            logits = model(
+                input_ids=input_ids, positions=positions, forward_mode="prefill"
+            )
         self.assertEqual(logits.shape, (1, 8, 1000))
 
     def test_llama_model_create(self):
@@ -562,7 +566,9 @@ class TestModelDummy(unittest.TestCase):
         input_ids = torch.randint(0, 1000, (2, 6))
         positions = torch.arange(6)
         with torch.inference_mode():
-            logits = model(input_ids=input_ids, positions=positions)
+            logits = model(
+                input_ids=input_ids, positions=positions, forward_mode="prefill"
+            )
         self.assertEqual(logits.shape, (2, 6, 1000))
 
     def test_mistral_model_create(self):
@@ -585,7 +591,9 @@ class TestModelDummy(unittest.TestCase):
         input_ids = torch.randint(0, 1000, (1, 8))
         positions = torch.arange(8)
         with torch.inference_mode():
-            logits = model(input_ids=input_ids, positions=positions)
+            logits = model(
+                input_ids=input_ids, positions=positions, forward_mode="prefill"
+            )
         self.assertEqual(logits.shape, (1, 8, 1000))
 
     def test_deep_decoder_forward(self):
@@ -616,7 +624,9 @@ class TestModelDummy(unittest.TestCase):
         )
         positions = torch.arange(16)
         with torch.inference_mode():
-            logits = model(input_ids=input_ids, positions=positions)
+            logits = model(
+                input_ids=input_ids, positions=positions, forward_mode="prefill"
+            )
         self.assertFalse(torch.isnan(logits).any(), f"NaN in logits: {logits}")
         self.assertFalse(torch.isinf(logits).any(), f"Inf in logits: {logits}")
 
@@ -667,6 +677,7 @@ class TestModelDummy(unittest.TestCase):
                 k_cache=k_all,
                 v_cache=v_all,
                 write_loc=write_loc,
+                forward_mode="prefill",
             )
 
         # Decode: 1 token, write to slot 8
@@ -720,7 +731,9 @@ class TestQwen3MoEModel(unittest.TestCase):
         input_ids = torch.randint(0, 1000, (1, 8))
         positions = torch.arange(8)
         with torch.inference_mode():
-            logits = model(input_ids=input_ids, positions=positions)
+            logits = model(
+                input_ids=input_ids, positions=positions, forward_mode="prefill"
+            )
         self.assertEqual(logits.shape, (1, 8, 1000))
 
     def test_moe_mlp_accepts_2d_input(self):
@@ -879,7 +892,9 @@ class TestSlidingWindow(unittest.TestCase):
         k = torch.randn(1, num_heads, seq_len, head_dim)
         v = torch.randn(1, num_heads, seq_len, head_dim)
 
-        out = PyTorchBackend.forward(q, k, v, sliding_window=window)
+        out = PyTorchBackend.forward(
+            q, k, v, sliding_window=window, forward_mode="prefill"
+        )
 
         pos = torch.arange(seq_len)
         allow = (pos.unsqueeze(0) <= pos.unsqueeze(1)) & (
@@ -1004,7 +1019,7 @@ class TestRegistry(unittest.TestCase):
             ids = torch.randint(0, 100, (1, 4))
             pos = torch.arange(4)
             with torch.inference_mode():
-                out = model(input_ids=ids, positions=pos)
+                out = model(input_ids=ids, positions=pos, forward_mode="prefill")
             self.assertEqual(out.shape, (1, 4, 100))
 
 
@@ -1156,7 +1171,9 @@ class TestOPTModel(unittest.TestCase):
         input_ids = torch.randint(0, 1000, (1, 8))
         positions = torch.arange(8)
         with torch.inference_mode():
-            logits = model(input_ids=input_ids, positions=positions)
+            logits = model(
+                input_ids=input_ids, positions=positions, forward_mode="prefill"
+            )
         self.assertEqual(logits.shape, (1, 8, 1000))
 
 
@@ -1318,7 +1335,7 @@ class TestSharedDecoder(unittest.TestCase):
         )
         x = torch.randn(1, 8, 128)
         positions = torch.arange(8)
-        out = layer(x, positions)
+        out = layer(x, positions, forward_mode="prefill")
         self.assertEqual(out.shape, (1, 8, 128))
 
     def test_llama_inherits_tie_weights(self):
@@ -1462,6 +1479,7 @@ class TestPyTorchBackendDecode(unittest.TestCase):
             v_cache=v_cache,
             req_to_token=req_to_token,
             cache_seqlens=cache_seqlens,
+            forward_mode="decode",
         )
         self.assertEqual(out.shape, (2, 4, 1, 32))
         self.assertFalse(torch.isnan(out).any())
@@ -1474,7 +1492,9 @@ class TestPyTorchBackendDecode(unittest.TestCase):
         v = torch.randn(1, 4, 8, 32)
         cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32)
 
-        out = PyTorchBackend.forward(q, k, v, cu_seqlens_q=cu_seqlens)
+        out = PyTorchBackend.forward(
+            q, k, v, cu_seqlens_q=cu_seqlens, forward_mode="prefill"
+        )
         self.assertEqual(out.shape, (1, 4, 8, 32))
         self.assertFalse(torch.isnan(out).any())
 
@@ -2039,7 +2059,7 @@ class TestServerArgsDevice(unittest.TestCase):
         q = torch.randn(1, 4, 8, 32)
         k = torch.randn(1, 4, 8, 32)
         v = torch.randn(1, 4, 8, 32)
-        out = AttentionBackend.forward(q, k, v)
+        out = AttentionBackend.forward(q, k, v, forward_mode="prefill")
         self.assertEqual(out.shape, q.shape)
         AttentionBackend.configure("fa")
 

@@ -31,7 +31,7 @@ class RadixNode:
     ``handle.page_ids[d // page_size]`` of the inserting request.
     """
 
-    __slots__ = ("children", "page_id", "parent", "ref_count", "token")
+    __slots__ = ("children", "depth", "page_id", "parent", "ref_count", "token")
 
     def __init__(self, token: int = -1) -> None:
         self.token = token
@@ -39,6 +39,9 @@ class RadixNode:
         self.ref_count: int = 0
         self.page_id: int = -1
         self.parent: RadixNode | None = None
+        # 0-indexed token depth (root is -1); maintained by insert/remove
+        # when the node is linked under its parent.
+        self.depth: int = -1
 
 
 class RadixCacheManager:
@@ -51,12 +54,8 @@ class RadixCacheManager:
         self.root.ref_count = 1  # Root always referenced
 
     def _depth(self, node: RadixNode) -> int:
-        """0-indexed token depth of a node (root is -1)."""
-        d = -1
-        while node is not self.root:
-            node = node.parent
-            d += 1
-        return d
+        """0-indexed token depth of a node (root is -1), maintained on insert."""
+        return node.depth
 
     def match_prefix(self, input_ids: list[int]) -> tuple[int, list[int]]:
         """Match a cached prefix; return (matched_len, shared_page_ids).
@@ -100,6 +99,7 @@ class RadixCacheManager:
             if token_id not in node.children:
                 child = RadixNode(token_id)
                 child.parent = node
+                child.depth = node.depth + 1
                 node.children[token_id] = child
             node = node.children[token_id]
             node.ref_count += 1
@@ -121,6 +121,7 @@ class RadixCacheManager:
                 # Generated suffix: new node, owned by the tree (ref_count 0).
                 child = RadixNode(token_id)
                 child.parent = node
+                child.depth = node.depth + 1
                 child.page_id = handle.page_ids[d // self.page_size]
                 node.children[token_id] = child
             else:

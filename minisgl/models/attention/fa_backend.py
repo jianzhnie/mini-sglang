@@ -165,18 +165,25 @@ class FlashAttentionBackend:
         """
         head_dim = q_flat.shape[2]
         out_flat = torch.empty_like(q_flat)
-        for i in range(len(prefix_lens)):
-            start = int(cu_seqlens[i].item())
-            end = int(cu_seqlens[i + 1].item())
-            total = int(prefix_lens[i].item()) + (end - start)
+        # One host sync for the whole loop instead of 3 .item() per request;
+        # cache_seqlens slices are views of one pre-built tensor, not a fresh
+        # tiny tensor allocation per request.
+        cu_list = cu_seqlens.tolist()
+        prefix_list = prefix_lens.tolist()
+        totals = torch.tensor(
+            [p + cu_list[i + 1] - cu_list[i] for i, p in enumerate(prefix_list)],
+            dtype=torch.int32,
+            device=q_flat.device,
+        )
+        for i in range(len(prefix_list)):
+            start = cu_list[i]
+            end = cu_list[i + 1]
             out_i = flash_attn_with_kvcache(
                 q_flat[start:end].unsqueeze(0),
                 k_cache,
                 v_cache,
                 block_table=block_table[i : i + 1],
-                cache_seqlens=torch.tensor(
-                    [total], dtype=torch.int32, device=q_flat.device
-                ),
+                cache_seqlens=totals[i : i + 1],
                 softmax_scale=1.0 / math.sqrt(head_dim),
                 causal=True,
                 window_size=window_size,

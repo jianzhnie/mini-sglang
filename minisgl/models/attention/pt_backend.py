@@ -129,11 +129,14 @@ class PyTorchBackend:
         flat_k = k_cache.reshape(-1, num_kv_heads, head_dim)
         flat_v = v_cache.reshape(-1, num_kv_heads, head_dim)
 
+        # One host sync for the whole loop instead of 3 .item() per request.
+        cu_list = cu_seqlens.tolist()
+        prefix_list = prefix_lens.tolist()
         outputs = torch.zeros_like(q)
-        for i in range(len(prefix_lens)):
-            start = int(cu_seqlens[i].item())
-            end = int(cu_seqlens[i + 1].item())
-            cached = int(prefix_lens[i].item())
+        for i in range(len(prefix_list)):
+            start = cu_list[i]
+            end = cu_list[i + 1]
+            cached = prefix_list[i]
             u = end - start
             total = cached + u
 
@@ -177,10 +180,12 @@ class PyTorchBackend:
         """Handle multi-sequence prefill by processing each sequence separately."""
         batch, num_heads, total_len, head_dim = q.shape
         outputs = torch.zeros_like(q)
-        num_seqs = len(cu_seqlens) - 1
+        # One host sync for the whole loop instead of 2 .item() per request.
+        cu_list = cu_seqlens.tolist()
+        num_seqs = len(cu_list) - 1
         for i in range(num_seqs):
-            start = int(cu_seqlens[i].item())
-            end = int(cu_seqlens[i + 1].item())
+            start = cu_list[i]
+            end = cu_list[i + 1]
             qi = q[:, :, start:end, :]
             ki = k[:, :, start:end, :]
             vi = v[:, :, start:end, :]
