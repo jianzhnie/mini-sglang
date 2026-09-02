@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-**Mini-SGLang** 是 [SGLang](https://github.com/sgl-project/sglang) 的轻量级教学实现，目标是用 ~8,000 行 Python 完整复刻一个高性能 LLM 推理框架。它拆解了现代 LLM 服务系统的每一个关键环节，让开发者能够逐行理解推理引擎的内部工作原理。
+**Mini-SGLang** 是 [SGLang](https://github.com/sgl-project/sglang) 的轻量级教学实现，目标是用 ~5,200 行 Python 完整复刻一个高性能 LLM 推理框架。它拆解了现代 LLM 服务系统的每一个关键环节，让开发者能够逐行理解推理引擎的内部工作原理。
 
 **解决的核心问题：**
 - 如何在 GPU 上高效运行大语言模型推理（Prefill/Decode 分离、CUDA Graph 加速）
@@ -85,7 +85,7 @@ minisgl/config.py: 参数配置模块
 15. 新 token 追加到请求的 input_ids，更新 page table
 
 ### 5. 拆词与返回
-16. Scheduler 的 `step()` 返回 `(uid, token_id, finished, finish_reason)` 四元组给 FrontendManager
+16. Scheduler 的 `step()` 返回 `list[OutputToken]`（dataclass，字段为 `uid` / `token_id` / `finished` / `finish_reason`）给 FrontendManager
 17. FrontendManager 用增量 detokenize 将 token 解码为文本片段
 18. FrontendManager 以 **SSE (Server-Sent Events)** 格式流式返回给客户端（`stream=true` 时；默认 `stream=false` 单次返回）
 19. 步骤 11-18 循环直到：遇到 EOS token 或达到 `max_tokens` 或客户端断开（断开会触发 `Scheduler.abort_request`）
@@ -167,7 +167,7 @@ class SamplingParams:
 ### 基础要求
 - **Qwen2** — Qwen2ForCausalLM（推荐首选实现）
 - **Qwen3** — Qwen3ForCausalLM（支持 GQA + QK Norm）
-- **Qwen3-MoE** — Qwen3MoEForCausalLM（含 MoE Router + FusedMoE）
+- **Qwen3-MoE** — Qwen3MoEForCausalLM（含 MoE Router + 融合 expert 权重）
 - **Llama** — LlamaForCausalLM（最经典的架构参考）
 - **Mistral** — MistralForCausalLM（含 Sliding Window Attention）
 

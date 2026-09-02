@@ -111,6 +111,21 @@ class TestAttentionBackend(unittest.TestCase):
         out = AttentionBackend.forward(q, k, v, forward_mode="prefill")
         self.assertEqual(out.shape, q.shape)
 
+    def test_package_reexports(self):
+        """minisgl.models.attention re-exports must alias the submodule classes."""
+        import minisgl.models.attention as attn_pkg
+        from minisgl.models.attention.dispatcher import AttentionBackend
+        from minisgl.models.attention.fa_backend import (
+            FlashAttentionBackend,
+            FlashInferBackend,
+        )
+        from minisgl.models.attention.pt_backend import PyTorchBackend
+
+        self.assertIs(attn_pkg.AttentionBackend, AttentionBackend)
+        self.assertIs(attn_pkg.FlashAttentionBackend, FlashAttentionBackend)
+        self.assertIs(attn_pkg.FlashInferBackend, FlashInferBackend)
+        self.assertIs(attn_pkg.PyTorchBackend, PyTorchBackend)
+
 
 # ── Test Sampling ──
 class TestSampler(unittest.TestCase):
@@ -198,7 +213,7 @@ class TestKVCachePool(unittest.TestCase):
         pool.free_pages_by_id(list(h2.page_ids))
         self.assertEqual(pool.free_count(), 10)
 
-    def test_get_kv_cache(self):
+    def test_get_all_kv_cache(self):
         from minisgl.engine.kvcache.pool import KVCachePool
 
         pool = KVCachePool(
@@ -846,7 +861,7 @@ class TestOPTTieWeights(unittest.TestCase):
         )
         model = OPTForCausalLM(config)
         embed = torch.randn(50, 32)
-        # HF key after the engine's model. -> model.decoder. remap.
+        # HF key after the registry's model. -> model.decoder. remap.
         state_dict = {"model.decoder.embed_tokens.weight": embed}
         model.tie_weights(state_dict)
         self.assertTrue(torch.equal(model.lm_head.weight.data, embed))
@@ -993,6 +1008,20 @@ class TestRegistry(unittest.TestCase):
     def test_detect_model_type_fallback(self):
         # Should not crash on non-existent path
         self.assertTrue(True)  # Module loaded OK
+
+    def test_get_remap_fn_opt(self):
+        from minisgl.models.registry import get_remap_fn
+
+        # OPT checkpoints nest weights under model.decoder.*; the remap inserts
+        # the "decoder." segment that our OPT module layout expects.
+        remap = get_remap_fn("opt")
+        self.assertIsNotNone(remap)
+        self.assertEqual(
+            remap("model.embed_tokens.weight"), "model.decoder.embed_tokens.weight"
+        )
+        # Other architectures load HF keys verbatim.
+        self.assertIsNone(get_remap_fn("qwen2"))
+        self.assertIsNone(get_remap_fn("llama"))
 
     def test_create_model(self):
         from minisgl.config import ModelArgs

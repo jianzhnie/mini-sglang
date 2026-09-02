@@ -4,7 +4,7 @@
   <img src="docs/images/mini-sglang.png" alt="Mini-SGLang overview">
 </p>
 
-**Mini-SGLang** 是 [SGLang](https://github.com/sgl-project/sglang) 的轻量级教学实现，用 ~5,000 行 Python 完整复刻了一个高性能 LLM 推理框架的核心机制。项目拆解了现代 LLM 服务系统的每一个关键环节，让开发者能够逐行理解推理引擎的内部工作原理。
+**Mini-SGLang** 是 [SGLang](https://github.com/sgl-project/sglang) 的轻量级教学实现，用 ~5,200 行 Python 完整复刻了一个高性能 LLM 推理框架的核心机制。项目拆解了现代 LLM 服务系统的每一个关键环节，让开发者能够逐行理解推理引擎的内部工作原理。
 
 ## 核心特性
 
@@ -48,8 +48,9 @@ KV Cache Pool + RadixCache + CUDA/NPU Graphs
 ```
 minisgl/
 ├── config.py           # 配置：ServerArgs, ModelArgs, SamplingParams
-├── __init__.py          # CLI 入口（--shell / --port / --tp-size）
-├── __main__.py          # `python -m minisgl` 入口
+├── __init__.py          # 包导出（LLM, ServerArgs, SamplingParams）
+├── cli.py               # CLI 入口（--shell / --port / --tp-size）
+├── __main__.py          # `python -m minisgl` 入口（调 cli.main）
 ├── engine/
 │   ├── engine.py        # 推理引擎：模型加载、forward、CUDA Graph
 │   ├── context.py       # BatchContext：批次张量管理
@@ -76,14 +77,16 @@ minisgl/
 │   │   ├── linear.py    # Column / Row Parallel Linear
 │   │   └── embedding.py # Vocab Parallel Embedding
 │   ├── attention/
-│   │   └── backend.py   # FlashAttention / PyTorch 后端（FlashInfer 为转调 FA 的占位）
+│   │   ├── dispatcher.py # AttentionBackend 静态路由器（fa / pt / fi 选择）
+│   │   ├── pt_backend.py  # PyTorch SDPA 后端（CPU/NPU 可用，支持滑窗与 extend）
+│   │   └── fa_backend.py  # FlashAttention 后端（FlashInfer 为转调 FA 的占位）
 │   └── tokenizer/
 │       └── worker.py    # HF Tokenizer Worker
 ├── scheduler/
 │   ├── scheduler.py     # 主调度器：prefill/decode 协调
 │   ├── prefill.py       # PrefillManager：pending 队列 + 令牌预算
 │   ├── decode.py        # DecodeManager：running 队列管理
-│   └── batch.py         # Req / Batch 数据结构
+│   └── batch.py         # Req / Batch / OutputToken 数据结构
 ├── sampling/
 │   └── sampler.py       # 采样器：greedy / top-k / top-p / temperature
 ├── server/
@@ -308,7 +311,7 @@ python examples/npu_inference.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5-1.5B Q
 ## 运行测试
 
 ```bash
-# 单元测试（101 个测试，CPU 即可，~30s）
+# 单元测试（102 个测试，CPU 即可，~30s）
 python tests/test_cpu_core.py
 
 # 示例冒烟测试（cpu_demo 无需模型；模型用例通过 MINISGL_TEST_MODELS 传入本地模型路径，未设置则跳过）

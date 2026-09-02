@@ -20,7 +20,9 @@ import time
 import urllib.request
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# The server runs in a spawned subprocess that re-imports this script, so the
+# repo root (not the examples/ dir) must be on sys.path for `import minisgl`.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 MODELS_ROOT = "/home/jianzhnie/llmtuner/hfhub/models"
 HOST, PORT = "127.0.0.1", 8765
