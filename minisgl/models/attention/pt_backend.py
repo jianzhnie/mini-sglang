@@ -5,11 +5,15 @@ extend-prefill it gathers cached K,V from the paged KV cache to provide
 full context for each request.
 """
 
+from __future__ import annotations
+
 __all__ = ["PyTorchBackend"]
 import math
 
 import torch
 import torch.nn.functional as F
+
+from minisgl.models.attention.metadata import AttentionMetadata
 
 
 class PyTorchBackend:
@@ -26,8 +30,8 @@ class PyTorchBackend:
         v: torch.Tensor,
         k_cache: torch.Tensor | None = None,
         v_cache: torch.Tensor | None = None,
-        write_loc: torch.Tensor | None = None,
-        **kwargs,
+        attn_meta: AttentionMetadata | None = None,
+        sliding_window: int | None = None,
     ) -> torch.Tensor:
         batch, num_heads, seq_len, head_dim = q.shape
         scale = 1.0 / math.sqrt(head_dim)
@@ -37,23 +41,25 @@ class PyTorchBackend:
             k = k.repeat_interleave(num_heads // num_kv_heads, dim=1)
             v = v.repeat_interleave(num_heads // num_kv_heads, dim=1)
 
-        forward_mode = kwargs.get("forward_mode")
-        if forward_mode is None:
-            msg = "PyTorchBackend requires an explicit forward_mode ('prefill' or 'decode')"
-            raise ValueError(msg)
-
-        if forward_mode == "decode":
+        if attn_meta is not None and attn_meta.forward_mode == "decode":
             return PyTorchBackend._decode_with_cache(
-                q, num_heads, head_dim, k_cache, v_cache, scale, **kwargs
+                q,
+                num_heads,
+                head_dim,
+                k_cache,
+                v_cache,
+                scale,
+                attn_meta,
+                sliding_window,
             )
 
-        # Prefill. Requests with a cached prefix use extend attention: the
-        # prefix KV is read back from the paged cache (the suffix KV was
-        # already written there by _write_kv_cache before this call).
-        prefix_lens = kwargs.get("prefix_lens")
-        req_to_token = kwargs.get("req_to_token")
-        cu_seqlens_q = kwargs.get("cu_seqlens_q")
-        sliding_window = kwargs.get("sliding_window")
+        # Prefill (attn_meta=None is just a cache-less causal prefill).
+        # Requests with a cached prefix use extend attention: the prefix KV
+        # is read back from the paged cache (the suffix KV was already
+        # written there by _write_kv_cache before this call).
+        prefix_lens = attn_meta.prefix_lens if attn_meta is not None else None
+        req_to_token = attn_meta.req_to_token if attn_meta is not None else None
+        cu_seqlens_q = attn_meta.cu_seqlens_q if attn_meta is not None else None
         if (
             prefix_lens is not None
             and req_to_token is not None
@@ -222,11 +228,12 @@ class PyTorchBackend:
         k_cache: torch.Tensor,
         v_cache: torch.Tensor,
         scale: float,
-        **kwargs,
+        attn_meta: AttentionMetadata,
+        sliding_window: int | None = None,
     ) -> torch.Tensor:
         """Gather cached K,V from page table and run full-context attention."""
-        req_to_token = kwargs.get("req_to_token")
-        cache_seqlens = kwargs.get("cache_seqlens")
+        req_to_token = attn_meta.req_to_token
+        cache_seqlens = attn_meta.cache_seqlens
 
         if req_to_token is None or cache_seqlens is None:
             msg = (
@@ -242,13 +249,12 @@ class PyTorchBackend:
         # cache_seqlens are total lengths INCLUDING the current token.
         # Prefer the scheduler-computed max (a plain Python int): it avoids a
         # per-layer .item() host sync and is legal during CUDA graph capture.
-        max_len = kwargs.get("max_seqlen")
+        max_len = attn_meta.max_seqlen
         if max_len is None:
             max_len = int(cache_seqlens.max().item())
         idxs = req_to_token[:, :max_len]
         valid_mask = idxs >= 0
 
-        sliding_window = kwargs.get("sliding_window")
         if sliding_window is not None:
             # The current query sits at absolute position cache_seqlens-1;
             # key j sits at absolute position j. Mask keys outside the window.

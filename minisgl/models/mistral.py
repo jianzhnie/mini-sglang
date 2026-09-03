@@ -11,6 +11,7 @@ __all__ = [
 ]
 import torch
 
+from minisgl.config import ModelArgs
 from minisgl.models.decoder import RMSNormForCausalLM, RMSNormModel
 from minisgl.models.layers.attention import BaseAttention
 from minisgl.models.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -21,13 +22,13 @@ from minisgl.utils.device import get_tp_size
 class MistralAttention(BaseAttention):
     """Multi-head attention for Mistral with Sliding Window and RoPE."""
 
-    def __init__(self, config) -> None:
+    def __init__(self, config: ModelArgs) -> None:
         super().__init__()
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_kv_heads
         self.head_dim = config.head_dim
         self.hidden_size = config.hidden_size
-        self._sliding_window = config.sliding_window
+        self.sliding_window = config.sliding_window
         tp_size = get_tp_size()
         self.num_local_heads = self.num_heads // tp_size
         self.num_local_kv_heads = max(1, self.num_kv_heads // tp_size)
@@ -58,13 +59,10 @@ class MistralAttention(BaseAttention):
     def _project_output(self, attn_output: torch.Tensor) -> torch.Tensor:
         return self.o_proj(attn_output)
 
-    def _extra_backend_kwargs(self) -> dict:
-        return {"sliding_window": self._sliding_window}
-
 
 class MistralForCausalLM(RMSNormForCausalLM):
     """Mistral model with language modeling head."""
 
-    def __init__(self, config) -> None:
+    def __init__(self, config: ModelArgs) -> None:
         model = RMSNormModel(config, attention_cls=MistralAttention)
         super().__init__(model, config)

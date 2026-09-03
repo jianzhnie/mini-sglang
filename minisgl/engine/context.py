@@ -3,17 +3,16 @@
 Prepares derived tensors from Batch metadata:
 - input_ids: concatenated token IDs
 - positions: position encodings
-- write_loc: KV cache write locations (page table indices)
-- req_to_token: page table (num_reqs, max_seq_len)
-- cu_seqlens_q: cumulative sequence lengths for FlashAttention varlen
-- prefix_lens: cached prefix length per request (extend attention)
-- block_table: page IDs per request (paged KV cache attention)
+- attn_meta: typed AttentionMetadata — write_loc (KV write slots),
+  req_to_token / block_table (page tables), cu_seqlens_q (varlen
+  boundaries), prefix_lens (cached prefix per request), max_seqlen
 - logits_indices: last-uncached-token index per request (prefill lm_head)
 """
 
 __all__ = ["BatchContext"]
 import torch
 
+from minisgl.models.attention.metadata import AttentionMetadata
 from minisgl.scheduler.batch import Batch, Req
 
 
@@ -88,10 +87,9 @@ class BatchContext:
             self.device, non_blocking=True
         )
 
+        write_loc = None
         if write_loc_parts:
-            batch.write_loc = torch.cat(write_loc_parts).to(
-                self.device, non_blocking=True
-            )
+            write_loc = torch.cat(write_loc_parts).to(self.device, non_blocking=True)
 
         batch.logits_indices = torch.tensor(logits_indices, dtype=torch.long).to(
             self.device, non_blocking=True
@@ -100,16 +98,10 @@ class BatchContext:
         seq_lens_t = torch.tensor(seq_lengths, dtype=torch.int32)
         cu = torch.zeros(len(seq_lengths) + 1, dtype=torch.int32)
         cu[1:] = seq_lens_t.cumsum(0)
-        batch.cu_seqlens_q = cu.to(device=self.device, non_blocking=True)
-        # Max uncached length as a Python int — backends use it for FA varlen
-        # sizing without a host sync (.item()).
-        batch.max_seqlen = max(seq_lengths) if seq_lengths else 0
-
-        batch.req_to_token = self._build_req_to_token(reqs)
 
         # Cached prefix length per request (extend attention reads these KV
         # entries from the shared prefix pages in req_to_token).
-        batch.prefix_lens = torch.tensor(
+        prefix_lens = torch.tensor(
             [req.cached_len for req in reqs], dtype=torch.int32
         ).to(self.device, non_blocking=True)
 
@@ -121,8 +113,20 @@ class BatchContext:
             handle = req.cache_handle
             ids = list(handle.page_ids[:max_blocks]) if handle is not None else []
             rows.append(ids + [-1] * (max_blocks - len(ids)))
-        batch.block_table = torch.tensor(rows, dtype=torch.int32).to(
+        block_table = torch.tensor(rows, dtype=torch.int32).to(
             self.device, non_blocking=True
+        )
+
+        batch.attn_meta = AttentionMetadata(
+            forward_mode="prefill",
+            write_loc=write_loc,
+            cu_seqlens_q=cu.to(device=self.device, non_blocking=True),
+            prefix_lens=prefix_lens,
+            block_table=block_table,
+            req_to_token=self._build_req_to_token(reqs),
+            # Max uncached length as a Python int — backends use it for FA
+            # varlen sizing without a host sync (.item()).
+            max_seqlen=max(seq_lengths) if seq_lengths else 0,
         )
 
     def _build_req_to_token(self, reqs: list[Req]) -> torch.Tensor:

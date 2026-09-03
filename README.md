@@ -77,6 +77,7 @@ minisgl/
 │   │   ├── linear.py    # Column / Row Parallel Linear
 │   │   └── embedding.py # Vocab Parallel Embedding
 │   ├── attention/
+│   │   ├── metadata.py    # AttentionMetadata：类型化的批次级 attention 输入（取代 kwargs 透传链）
 │   │   ├── dispatcher.py # AttentionBackend 静态路由器（fa / pt / fi 选择）
 │   │   ├── pt_backend.py  # PyTorch SDPA 后端（CPU/NPU 可用，支持滑窗与 extend）
 │   │   └── fa_backend.py  # FlashAttention 后端（FlashInfer 为转调 FA 的占位）
@@ -109,6 +110,14 @@ RMSNormForCausalLM          ← Qwen2/Qwen3/Llama/Mistral/Qwen3MoE 继承
 ```
 
 每个模型文件只需定义自己独特的 Attention 类（~50 行）。
+
+### Attention 数据流（AttentionMetadata 契约）
+
+模型 forward 签名统一为 `forward(input_ids, positions, attn_meta, logits_indices)`：
+
+- **AttentionMetadata**（`models/attention/metadata.py`）— 类型化的批次级 attention 输入（KV 写入位置 `write_loc`、页表 `block_table` / `req_to_token`、varlen 边界 `cu_seqlens_q`、序列长度等），由 Scheduler 侧构建（prefill 走 `BatchContext`，decode 走 `DecodeManager`），attention backend 消费；取代了旧的 `**kwargs` 透传链
+- **层持 KV Cache** — 每个 attention 层通过 `set_kv_cache()` 绑定 KV pool 中自己的切片（Engine 启动时一次性完成），forward 时按 `attn_meta.write_loc` 写入新 K/V；KV cache 张量本身不再随 forward 调用传递
+- `attn_meta=None` 表示无 KV cache 的普通因果自注意力（测试与教学演示用）
 
 ## 快速开始
 
@@ -311,7 +320,7 @@ python examples/npu_inference.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5-1.5B Q
 ## 运行测试
 
 ```bash
-# 单元测试（102 个测试，CPU 即可，~30s）
+# 单元测试（104 个测试，CPU 即可，~15s）
 python tests/test_cpu_core.py
 
 # 示例冒烟测试（cpu_demo 无需模型；模型用例通过 MINISGL_TEST_MODELS 传入本地模型路径，未设置则跳过）

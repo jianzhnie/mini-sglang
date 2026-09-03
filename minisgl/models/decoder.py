@@ -14,6 +14,9 @@ __all__ = [
 import torch
 import torch.nn as nn
 
+from minisgl.config import ModelArgs
+from minisgl.models.attention.metadata import AttentionMetadata
+from minisgl.models.layers.attention import BaseAttention
 from minisgl.models.layers.embedding import VocabParallelEmbedding
 from minisgl.models.layers.linear import ColumnParallelLinear, RowParallelLinear
 from minisgl.models.layers.rms_norm import RMSNorm
@@ -75,19 +78,14 @@ class RMSNormDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
         residual: torch.Tensor | None = None,
-        k_cache: torch.Tensor | None = None,
-        v_cache: torch.Tensor | None = None,
-        write_loc: torch.Tensor | None = None,
-        **kwargs,
+        attn_meta: AttentionMetadata | None = None,
     ) -> torch.Tensor:
         if residual is None:
             residual = hidden_states
             hidden_states, _ = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        attn_out = self.self_attn(
-            hidden_states, positions, k_cache, v_cache, write_loc, **kwargs
-        )
+        attn_out = self.self_attn(hidden_states, positions, attn_meta)
         # Fused add: normalizes attn_out + residual and returns the new residual.
         hidden_states, residual = self.post_attention_layernorm(attn_out, residual)
         return self.mlp(hidden_states) + residual
@@ -101,9 +99,9 @@ class RMSNormModel(nn.Module):
 
     def __init__(
         self,
-        config,
-        attention_cls: type,
-        mlp_cls: type | None = None,
+        config: ModelArgs,
+        attention_cls: type[BaseAttention],
+        mlp_cls: type[GatedMLP] | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -132,25 +130,12 @@ class RMSNormModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        k_cache: torch.Tensor | None = None,
-        v_cache: torch.Tensor | None = None,
-        write_loc: torch.Tensor | None = None,
-        **kwargs,
+        attn_meta: AttentionMetadata | None = None,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
-        for i, layer in enumerate(self.layers):
-            layer_k_cache = k_cache[i] if k_cache is not None else None
-            layer_v_cache = v_cache[i] if v_cache is not None else None
-            hidden_states = layer(
-                hidden_states,
-                positions,
-                residual,
-                layer_k_cache,
-                layer_v_cache,
-                write_loc,
-                **kwargs,
-            )
+        for layer in self.layers:
+            hidden_states = layer(hidden_states, positions, residual, attn_meta)
         hidden_states, _ = self.norm(hidden_states)
         return hidden_states
 
@@ -158,7 +143,7 @@ class RMSNormModel(nn.Module):
 class RMSNormForCausalLM(nn.Module):
     """RMSNorm-based CausalLM with tie_weights support."""
 
-    def __init__(self, model: nn.Module, config) -> None:
+    def __init__(self, model: nn.Module, config: ModelArgs) -> None:
         super().__init__()
         self.model = model
         self.lm_head = ColumnParallelLinear(
@@ -170,20 +155,15 @@ class RMSNormForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        k_cache: torch.Tensor | None = None,
-        v_cache: torch.Tensor | None = None,
-        write_loc: torch.Tensor | None = None,
+        attn_meta: AttentionMetadata | None = None,
         logits_indices: torch.Tensor | None = None,
-        **kwargs,
     ) -> torch.Tensor:
-        hidden_states = self.model(
-            input_ids, positions, k_cache, v_cache, write_loc, **kwargs
-        )
+        hidden_states = self.model(input_ids, positions, attn_meta)
         if logits_indices is not None:
             hidden_states = gather_last_logits(hidden_states, logits_indices)
         return self.lm_head(hidden_states)
 
-    def tie_weights(self, state_dict: dict) -> None:
+    def tie_weights(self, state_dict: dict[str, torch.Tensor]) -> None:
         """Tie lm_head weight with embed_tokens if config says so."""
         if not self.config.tie_word_embeddings:
             return

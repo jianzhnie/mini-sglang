@@ -9,6 +9,7 @@ import torch
 
 from minisgl.config import SamplingParams
 from minisgl.engine.kvcache.pool import BaseCacheHandle
+from minisgl.models.attention.metadata import AttentionMetadata
 
 
 class SequenceStatus(Enum):
@@ -61,19 +62,12 @@ class Batch:
     reqs: list[Req] = field(default_factory=list)
     phase: Literal["prefill", "decode"] = "prefill"
 
-    # Derived fields filled by BatchContext
+    # Derived fields filled by BatchContext (prefill) / DecodeManager (decode)
     input_ids: torch.Tensor | None = None  # (total_tokens,)
     positions: torch.Tensor | None = None  # (total_tokens,)
-    write_loc: torch.Tensor | None = None  # (total_tokens,) page table indices
-    req_to_token: torch.Tensor | None = None  # (num_reqs, max_seq_len) page table
-    cu_seqlens_q: torch.Tensor | None = None  # (num_reqs+1,) varlen boundaries
-    block_table: torch.Tensor | None = None  # (num_reqs, max_blocks) page indices
-    cache_seqlens: torch.Tensor | None = None  # (num_reqs,) total lens incl. current
-    prefix_lens: torch.Tensor | None = None  # (num_reqs,) cached prefix lengths
+    # Attention inputs for this batch: KV write slots, page tables, varlen
+    # boundaries, sequence lengths. See AttentionMetadata.
+    attn_meta: AttentionMetadata | None = None
     # (num_reqs,) index of each request's last uncached token in the flat
     # prefill batch — prefill only runs lm_head on these positions.
     logits_indices: torch.Tensor | None = None
-    # Max sequence length of the batch as a Python int (prefill: max uncached
-    # len; decode: max total len). Lets attention backends avoid .item()
-    # host syncs, which are also illegal during CUDA graph capture.
-    max_seqlen: int | None = None

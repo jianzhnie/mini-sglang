@@ -72,7 +72,8 @@ minisgl/config.py: 参数配置模块
 7. 将 prompt tokens 打包成 `Batch`（phase="prefill"），由 BatchContext 填充：
    - `input_ids`: token 索引
    - `positions`: 位置编码
-   - `write_loc`: KV Cache 写入位置（page table 索引）
+   - `attn_meta`: 类型化的 `AttentionMetadata`（KV 写入位置 `write_loc`、页表 `block_table` / `req_to_token`、varlen 边界 `cu_seqlens_q` 等）
+   - `logits_indices`: 每个请求最后一个未缓存 token 的索引（lm_head 只算这些位置）
 8. Engine 执行一次完整 forward：**所有 prompt tokens 并行处理**（lm_head 只算每个请求最后一个位置）
 9. 生成第一个 output token，并立即检查终止条件（EOS / max_tokens / max_seq_len）
 10. 请求移入 running 列表（状态：pending → running）
@@ -109,13 +110,33 @@ class Req:
 
 ### Batch（批次）
 ```python
-@dataclass
+@dataclass(slots=True)
 class Batch:
-    reqs: List[Req]            # 本次 forward 包含的请求
+    reqs: list[Req]            # 本次 forward 包含的请求
     phase: Literal["prefill", "decode"]
-    # 由 Context 管理的派生字段：
-    # input_ids, positions, write_loc (page table indices)
+    # 由 BatchContext (prefill) / DecodeManager (decode) 填充的派生字段：
+    input_ids: torch.Tensor        # (total_tokens,)
+    positions: torch.Tensor        # (total_tokens,)
+    attn_meta: AttentionMetadata   # 批次级 attention 输入（见下）
+    logits_indices: torch.Tensor   # prefill：各请求最后一个未缓存 token 的索引
 ```
+
+### AttentionMetadata（批次级 attention 输入）
+```python
+@dataclass(slots=True)
+class AttentionMetadata:
+    forward_mode: str          # "prefill" | "decode"
+    write_loc: Tensor          # (total_tokens,) KV Cache 写入槽位（-1 跳过）
+    cu_seqlens_q: Tensor       # prefill varlen 边界
+    prefix_lens: Tensor        # 每请求已缓存前缀长度（extend attention）
+    block_table: Tensor        # (num_reqs, max_blocks) 页表（FA 后端方言）
+    req_to_token: Tensor       # (num_reqs, max_seq_len) 页表（PT 后端方言）
+    cache_seqlens: Tensor      # decode：含当前 token 的总长度
+    max_seqlen: int            # Python int，避免 backend 里 .item() 主机同步
+```
+模型 forward 签名统一为 `forward(input_ids, positions, attn_meta=None, logits_indices=None)`。
+KV Cache 张量不随 forward 传递：每个 attention 层在 Engine 启动时通过
+`set_kv_cache()` 绑定自己在 KV pool 中的切片，forward 时按 `write_loc` 写入。
 
 ### SamplingParams（采样参数）
 ```python

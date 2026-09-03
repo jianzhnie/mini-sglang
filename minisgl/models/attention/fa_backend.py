@@ -6,6 +6,8 @@ Holds the flash-attn / flashinfer availability detection and exports it
 call is delegated to FlashAttention.
 """
 
+from __future__ import annotations
+
 __all__ = [
     "FlashAttentionBackend",
     "FlashInferBackend",
@@ -13,6 +15,8 @@ __all__ = [
 import math
 
 import torch
+
+from minisgl.models.attention.metadata import AttentionMetadata
 
 _FLASH_ATTN_AVAILABLE = False
 _FLASHINFER_AVAILABLE = False
@@ -44,8 +48,8 @@ class FlashAttentionBackend:
         v: torch.Tensor,
         k_cache: torch.Tensor | None = None,
         v_cache: torch.Tensor | None = None,
-        write_loc: torch.Tensor | None = None,
-        **kwargs,
+        attn_meta: AttentionMetadata | None = None,
+        sliding_window: int | None = None,
     ) -> torch.Tensor:
         if not _FLASH_ATTN_AVAILABLE:
             msg = "flash-attn not installed"
@@ -57,37 +61,29 @@ class FlashAttentionBackend:
         num_kv_heads = k.shape[1]
 
         # Sliding window (Mistral): FA expects (left, right) offsets.
-        sliding_window = kwargs.get("sliding_window")
         window_size = (sliding_window - 1, 0) if sliding_window else (-1, -1)
 
-        forward_mode = kwargs.get("forward_mode")
-        if forward_mode is None:
-            msg = "FlashAttentionBackend requires an explicit forward_mode ('prefill' or 'decode')"
-            raise ValueError(msg)
-
         # Decode: use paged KV cache
-        if forward_mode == "decode":
-            cache_seqlens = kwargs.get("cache_seqlens")
-            block_table = kwargs.get("block_table")
+        if attn_meta is not None and attn_meta.forward_mode == "decode":
             # cache_seqlens semantics: total length including the current
             # token, which is exactly what flash_attn_with_kvcache expects.
             return flash_attn_with_kvcache(
                 q.transpose(1, 2),
                 k_cache,
                 v_cache,
-                block_table=block_table,
-                cache_seqlens=cache_seqlens,
+                block_table=attn_meta.block_table,
+                cache_seqlens=attn_meta.cache_seqlens,
                 softmax_scale=1.0 / math.sqrt(head_dim),
                 causal=True,
                 window_size=window_size,
             ).transpose(1, 2)
 
-        # Prefill
+        # Prefill (attn_meta=None is a single cache-less causal sequence).
         q_flat = q.transpose(1, 2).reshape(-1, num_heads, head_dim)
         k_flat = k.transpose(1, 2).reshape(-1, num_kv_heads, head_dim)
         v_flat = v.transpose(1, 2).reshape(-1, num_kv_heads, head_dim)
 
-        cu_seqlens_q = kwargs.get("cu_seqlens_q")
+        cu_seqlens_q = attn_meta.cu_seqlens_q if attn_meta is not None else None
         if cu_seqlens_q is not None:
             cu_seqlens_q = cu_seqlens_q.to(dtype=torch.int32, device=q.device)
         else:
@@ -98,8 +94,8 @@ class FlashAttentionBackend:
 
         # Extend attention: requests with a cached prefix read the prefix KV
         # from the paged cache instead of the (suffix-only) k/v tensors.
-        prefix_lens = kwargs.get("prefix_lens")
-        block_table = kwargs.get("block_table")
+        prefix_lens = attn_meta.prefix_lens if attn_meta is not None else None
+        block_table = attn_meta.block_table if attn_meta is not None else None
         if (
             prefix_lens is not None
             and block_table is not None
@@ -122,8 +118,8 @@ class FlashAttentionBackend:
 
         # Prefer the scheduler-computed max sequence length (a plain Python
         # int, no host sync); fall back to deriving it from cu_seqlens for
-        # legacy callers.
-        max_seqlen = kwargs.get("max_seqlen")
+        # cache-less callers (attn_meta=None — tests and teaching demos).
+        max_seqlen = attn_meta.max_seqlen if attn_meta is not None else None
         if max_seqlen is None:
             max_seqlen = (
                 int((cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max().item())
@@ -208,8 +204,8 @@ class FlashInferBackend:
         v: torch.Tensor,
         k_cache: torch.Tensor | None = None,
         v_cache: torch.Tensor | None = None,
-        write_loc: torch.Tensor | None = None,
-        **kwargs,
+        attn_meta: AttentionMetadata | None = None,
+        sliding_window: int | None = None,
     ) -> torch.Tensor:
         if not _FLASHINFER_AVAILABLE:
             msg = "flashinfer not installed"
@@ -220,6 +216,6 @@ class FlashInferBackend:
             v,
             k_cache,
             v_cache,
-            write_loc,
-            **kwargs,
+            attn_meta,
+            sliding_window,
         )

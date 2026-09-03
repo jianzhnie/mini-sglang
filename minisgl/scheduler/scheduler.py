@@ -35,6 +35,10 @@ class Scheduler:
         self.engine = engine
         self.device = engine.device
 
+        # Share the engine's KV pool: the scheduler never allocates GPU/CPU
+        # memory itself, it only decides which pages requests get (via the
+        # cache managers below). Single-process teaching design — in SGLang
+        # the scheduler owns the pool outright.
         self.pool = engine.kv_cache_pool
         if cache_strategy == "naive":
             self.cache_manager = NaiveCacheManager(self.pool)
@@ -85,7 +89,7 @@ class Scheduler:
         return self._normalize_eos(raw_eos)
 
     @staticmethod
-    def _normalize_eos(raw_eos) -> set[int]:
+    def _normalize_eos(raw_eos: int | list[int] | dict) -> set[int]:
         """Convert various EOS formats to a set of int IDs."""
         if isinstance(raw_eos, int):
             return {raw_eos}
@@ -154,7 +158,7 @@ class Scheduler:
     def _collect_results(
         self,
         batch: Batch,
-        next_tokens: list,
+        next_tokens: list[int],
         results: list[OutputToken],
         finished_reqs: list[Req],
     ) -> None:

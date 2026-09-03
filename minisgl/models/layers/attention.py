@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 
 from minisgl.models.attention.dispatcher import AttentionBackend
+from minisgl.models.attention.metadata import AttentionMetadata
 
 
 class BaseAttention(nn.Module):
@@ -20,24 +21,23 @@ class BaseAttention(nn.Module):
 
     Subclasses must set: num_heads, num_kv_heads, head_dim, hidden_size.
     Subclasses must implement: _project_qkv(), _project_output().
-    Optional hooks: _pre_rope_hook(q, k), _extra_backend_kwargs().
+    Optional hooks: _pre_rope_hook(q, k).
+    Optional attributes: sliding_window (band width for Mistral-style
+    sliding-window attention).
 
-    kwargs contract
-    ---------------
-    Callers above forward their **kwargs down a five-level chain:
-    CausalLM -> Model -> decoder layer -> BaseAttention -> attention backend.
-    Recognized keys along this chain:
+    KV cache ownership
+    ------------------
+    Each layer holds its own slice of the paged KV cache pool: the engine
+    calls set_kv_cache() once at startup (with this layer's slice), and
+    forward() writes new K/V into it at attn_meta.write_loc. The per-batch
+    inputs (page tables, varlen boundaries, sequence lengths) travel in a
+    single typed AttentionMetadata object instead of the old **kwargs
+    passthrough chain.
 
-    - forward_mode: "prefill" or "decode".
-    - cu_seqlens_q: (num_reqs+1,) varlen query boundaries (prefill).
-    - prefix_lens: (num_reqs,) cached prefix lengths (extend prefill).
-    - block_table / req_to_token: paged-KV page tables (decode).
-    - cache_seqlens: (num_reqs,) total length including the current token.
-    - max_seqlen: batch max sequence length as a Python int (avoids .item()
-      host syncs, which are illegal during CUDA graph capture).
-    - sliding_window: band width for Mistral-style sliding-window attention.
-    - logits_indices: (num_reqs,) last-uncached-token index per request
-      (prefill runs lm_head only on these positions).
+    attn_meta=None means plain causal self-attention without a KV cache
+    (used by tests and teaching demos). logits_indices never reaches this
+    level — it is consumed by the CausalLM wrapper to select which hidden
+    rows feed the lm_head.
 
     Implicit shape convention: prefill input is always a flat
     (total_tokens, hidden) tensor; forward() unsqueezes it into a fake
@@ -50,6 +50,16 @@ class BaseAttention(nn.Module):
     num_kv_heads: int
     head_dim: int
     hidden_size: int
+    sliding_window: int | None = None
+    # Per-layer slices of the paged KV cache pool, bound once by the engine
+    # via set_kv_cache(); None means "no KV cache" (plain causal attention).
+    k_cache: torch.Tensor | None = None
+    v_cache: torch.Tensor | None = None
+
+    def set_kv_cache(self, k_cache: torch.Tensor, v_cache: torch.Tensor) -> None:
+        """Bind this layer's slice of the paged KV cache pool (one-time setup)."""
+        self.k_cache = k_cache
+        self.v_cache = v_cache
 
     def _project_qkv(
         self, hidden_states: torch.Tensor
@@ -64,10 +74,6 @@ class BaseAttention(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Optional normalization before RoPE (e.g., Qwen3 QK norm)."""
         return q, k
-
-    def _extra_backend_kwargs(self) -> dict:
-        """Optional extra kwargs for attention backend (e.g., sliding_window)."""
-        return {}
 
     def _apply_rope(
         self,
@@ -101,10 +107,9 @@ class BaseAttention(nn.Module):
         self,
         k: torch.Tensor,
         v: torch.Tensor,
-        k_cache: torch.Tensor | None,
-        v_cache: torch.Tensor | None,
         write_loc: torch.Tensor | None,
     ) -> None:
+        k_cache, v_cache = self.k_cache, self.v_cache
         if k_cache is None or write_loc is None:
             return
 
@@ -133,10 +138,7 @@ class BaseAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
-        k_cache: torch.Tensor | None = None,
-        v_cache: torch.Tensor | None = None,
-        write_loc: torch.Tensor | None = None,
-        **kwargs,
+        attn_meta: AttentionMetadata | None = None,
     ) -> torch.Tensor:
         squeeze_out = hidden_states.dim() == 2
         if squeeze_out:
@@ -153,18 +155,17 @@ class BaseAttention(nn.Module):
 
         self._apply_rope(q, k, positions)
 
-        self._write_kv_cache(k, v, k_cache, v_cache, write_loc)
+        write_loc = attn_meta.write_loc if attn_meta is not None else None
+        self._write_kv_cache(k, v, write_loc)
 
-        backend_kwargs = self._extra_backend_kwargs()
-        backend_kwargs.update(kwargs)
         output = AttentionBackend.forward(
             q,
             k,
             v,
-            k_cache,
-            v_cache,
-            write_loc,
-            **backend_kwargs,
+            self.k_cache,
+            self.v_cache,
+            attn_meta,
+            self.sliding_window,
         )
         output = self._reshape_output(output, batch_size, seq_len)
         output = self._project_output(output)

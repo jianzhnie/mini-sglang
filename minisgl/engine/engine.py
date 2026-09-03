@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from minisgl.config import ModelArgs, ServerArgs
-    from minisgl.scheduler.batch import Batch
+    from minisgl.scheduler.batch import Batch, Req
 
 __all__ = ["Engine"]
 import torch
@@ -16,6 +16,8 @@ import torch
 from minisgl.engine.context import BatchContext
 from minisgl.engine.kvcache.pool import BaseCacheHandle, KVCachePool
 from minisgl.models.attention.dispatcher import AttentionBackend
+from minisgl.models.attention.metadata import AttentionMetadata
+from minisgl.models.layers.attention import BaseAttention
 from minisgl.models.layers.rope import RotaryEmbedding
 from minisgl.sampling.sampler import Sampler
 from minisgl.utils.device import (
@@ -150,7 +152,7 @@ class Engine:
     def __enter__(self) -> "Engine":
         return self
 
-    def __exit__(self, *args) -> None:
+    def __exit__(self, *args: object) -> None:
         self.cleanup()
 
     def cleanup(self) -> None:
@@ -158,12 +160,15 @@ class Engine:
         self._graphs.clear()
         self._graph_inputs.clear()
         self._graph_outputs.clear()
-        # k_cache/v_cache are views into the pool buffer; drop them too or
-        # the pool's memory stays referenced and cannot be released.
-        # The graph pad handle is released together with the pool.
-        for attr in ("k_cache", "v_cache"):
-            if hasattr(self, attr):
-                delattr(self, attr)
+        # The per-layer k_cache/v_cache references are views into the pool
+        # buffer; drop them too or the pool's memory stays referenced and
+        # cannot be released. The graph pad handle is released together with
+        # the pool.
+        if hasattr(self, "model"):
+            for module in self.model.modules():
+                if isinstance(module, BaseAttention):
+                    module.k_cache = None
+                    module.v_cache = None
         if hasattr(self, "kv_cache_pool"):
             del self.kv_cache_pool
         synchronize()
@@ -263,23 +268,37 @@ class Engine:
         )
 
     def _assign_kv_cache(self) -> None:
-        """Assign KV cache slices to each model layer."""
-        # Store as (num_layers, num_pages, page_size, num_kv_heads, head_dim)
-        k_all, v_all = self.kv_cache_pool.get_all_kv_cache()
-        self.k_cache = k_all
-        self.v_cache = v_all
+        """Bind each attention layer to its slice of the paged KV cache pool.
 
-    def _run_model(self, *, forward_mode: str, **kwargs) -> torch.Tensor:
+        The pool buffer is (num_layers, num_pages, page_size, num_kv_heads,
+        head_dim); modules() yields the layers' attention modules in layer
+        order, so layer i gets slice i.
+        """
+        k_all, v_all = self.kv_cache_pool.get_all_kv_cache()
+        layer_id = 0
+        for module in self.model.modules():
+            if isinstance(module, BaseAttention):
+                module.set_kv_cache(k_all[layer_id], v_all[layer_id])
+                layer_id += 1
+
+    def _run_model(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        attn_meta: AttentionMetadata | None = None,
+        logits_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Single entry point for model forward.
 
-        Supplies k_cache/v_cache and the forward mode; callers pass only the
-        metadata fields their phase needs (prefill vs decode vs graph capture).
+        The KV cache no longer travels through the call — each attention
+        layer holds its own slice (see _assign_kv_cache); only the per-batch
+        AttentionMetadata is passed in.
         """
         return self.model(
-            k_cache=self.k_cache,
-            v_cache=self.v_cache,
-            forward_mode=forward_mode,
-            **kwargs,
+            input_ids=input_ids,
+            positions=positions,
+            attn_meta=attn_meta,
+            logits_indices=logits_indices,
         )
 
     def forward(self, batch: Batch) -> torch.Tensor:
@@ -288,16 +307,10 @@ class Engine:
             self.batch_context.prepare(batch)
             with torch.inference_mode():
                 return self._run_model(
-                    input_ids=batch.input_ids,
-                    positions=batch.positions,
-                    write_loc=batch.write_loc,
-                    cu_seqlens_q=batch.cu_seqlens_q,
-                    req_to_token=batch.req_to_token,
-                    prefix_lens=batch.prefix_lens,
-                    block_table=batch.block_table,
-                    max_seqlen=batch.max_seqlen,
-                    logits_indices=batch.logits_indices,
-                    forward_mode="prefill",
+                    batch.input_ids,
+                    batch.positions,
+                    batch.attn_meta,
+                    batch.logits_indices,
                 )
 
         # Decode: try execution graph first, fall back to eager
@@ -305,34 +318,30 @@ class Engine:
         graph = self._find_graph(bs)
         if graph is not None:
             graph_bs, ins, outs = graph
+            meta = ins["attn_meta"]
             with torch.inference_mode():
                 ins["input_ids"][:bs].copy_(batch.input_ids)
                 ins["positions"][:bs].copy_(batch.positions)
-                ins["write_loc"][:bs].copy_(batch.write_loc)
-                ins["cache_seqlens"][:bs].copy_(batch.cache_seqlens)
-                ins["block_table"][:bs].copy_(batch.block_table)
-                ins["req_to_token"][:bs].copy_(batch.req_to_token)
+                meta.write_loc[:bs].copy_(batch.attn_meta.write_loc)
+                meta.cache_seqlens[:bs].copy_(batch.attn_meta.cache_seqlens)
+                meta.block_table[:bs].copy_(batch.attn_meta.block_table)
+                meta.req_to_token[:bs].copy_(batch.attn_meta.req_to_token)
                 # Padding rows point at the reserved trash page so their KV
                 # writes and reads never touch real requests' pages.
                 if bs < graph_bs:
-                    ins["write_loc"][bs:].fill_(self._graph_pad_loc)
-                    ins["cache_seqlens"][bs:].fill_(1)
-                    ins["block_table"][bs:].fill_(self._graph_pad_page_id)
-                    ins["req_to_token"][bs:].fill_(self._graph_pad_loc)
+                    meta.write_loc[bs:].fill_(self._graph_pad_loc)
+                    meta.cache_seqlens[bs:].fill_(1)
+                    meta.block_table[bs:].fill_(self._graph_pad_page_id)
+                    meta.req_to_token[bs:].fill_(self._graph_pad_loc)
                 self._graphs[graph_bs].replay()
                 # Clone: outs is a static buffer overwritten by the next replay.
                 return outs[:bs].clone()
         else:
             with torch.inference_mode():
                 return self._run_model(
-                    input_ids=batch.input_ids,
-                    positions=batch.positions,
-                    write_loc=batch.write_loc,
-                    cache_seqlens=batch.cache_seqlens,
-                    block_table=batch.block_table,
-                    req_to_token=batch.req_to_token,
-                    max_seqlen=batch.max_seqlen,
-                    forward_mode="decode",
+                    batch.input_ids,
+                    batch.positions,
+                    batch.attn_meta,
                 )
 
     def _find_graph(self, batch_size: int) -> tuple | None:
@@ -342,7 +351,7 @@ class Engine:
                 return (bs, self._graph_inputs[bs], self._graph_outputs[bs])
         return None
 
-    def sample(self, logits: torch.Tensor, batch: Batch) -> list:
+    def sample(self, logits: torch.Tensor, batch: Batch) -> list[int]:
         """Sample next tokens from logits.
 
         Groups requests with identical sampling params for batched sampling.
@@ -358,7 +367,7 @@ class Engine:
             logits = logits.unsqueeze(0)  # (1, vocab_size)
         return self._sample_batched(logits, batch.reqs)
 
-    def _sample_batched(self, logits: torch.Tensor, reqs: list) -> list:
+    def _sample_batched(self, logits: torch.Tensor, reqs: list[Req]) -> list[int]:
         """Batch sample by grouping requests with identical sampling params.
 
         Fast path: if all requests are greedy, skip grouping entirely.
@@ -457,20 +466,22 @@ class Engine:
         req_to_token = torch.full(
             (batch_size, args.max_seq_len), pad_loc, dtype=torch.int32, device=device
         )
+        # One resident metadata object wrapping the static buffers: the
+        # captured graph reads through it, and replay only copy_()s new
+        # values into the same buffers (the object itself never changes).
+        attn_meta = AttentionMetadata(
+            forward_mode="decode",
+            write_loc=write_loc,
+            block_table=block_table,
+            req_to_token=req_to_token,
+            cache_seqlens=cache_seqlens,
+            # Static Python int: keeps the captured graph free of .item()
+            # host syncs in the PyTorch attention backend.
+            max_seqlen=args.max_seq_len,
+        )
 
         def run_decode() -> torch.Tensor:
-            return self._run_model(
-                input_ids=input_ids,
-                positions=positions,
-                write_loc=write_loc,
-                cache_seqlens=cache_seqlens,
-                block_table=block_table,
-                req_to_token=req_to_token,
-                # Static Python int: keeps the captured graph free of .item()
-                # host syncs in the PyTorch attention backend.
-                max_seqlen=args.max_seq_len,
-                forward_mode="decode",
-            )
+            return self._run_model(input_ids, positions, attn_meta)
 
         with torch.inference_mode():
             # Warmup
@@ -493,9 +504,6 @@ class Engine:
         self._graph_inputs[batch_size] = {
             "input_ids": input_ids,
             "positions": positions,
-            "write_loc": write_loc,
-            "cache_seqlens": cache_seqlens,
-            "block_table": block_table,
-            "req_to_token": req_to_token,
+            "attn_meta": attn_meta,
         }
         self._graph_outputs[batch_size] = output

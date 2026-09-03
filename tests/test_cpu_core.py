@@ -107,8 +107,8 @@ class TestAttentionBackend(unittest.TestCase):
         q = torch.randn(1, 8, 32, 64)  # (batch, heads, seq, head_dim)
         k = torch.randn(1, 8, 32, 64)
         v = torch.randn(1, 8, 32, 64)
-        # Should not raise
-        out = AttentionBackend.forward(q, k, v, forward_mode="prefill")
+        # attn_meta=None: plain causal self-attention without KV cache.
+        out = AttentionBackend.forward(q, k, v)
         self.assertEqual(out.shape, q.shape)
 
     def test_package_reexports(self):
@@ -361,7 +361,8 @@ class TestSchedulerBatch(unittest.TestCase):
 
         self.assertEqual(batch.input_ids.tolist(), [1, 2, 3, 4, 5])
         self.assertEqual(batch.positions.tolist(), [0, 1, 2, 3, 4])
-        self.assertIsNotNone(batch.write_loc)
+        self.assertIsNotNone(batch.attn_meta)
+        self.assertIsNotNone(batch.attn_meta.write_loc)
 
 
 # ── Test Distributed ──
@@ -527,9 +528,7 @@ class TestModelDummy(unittest.TestCase):
         positions = torch.arange(8)
 
         with torch.inference_mode():
-            logits = model(
-                input_ids=input_ids, positions=positions, forward_mode="prefill"
-            )
+            logits = model(input_ids=input_ids, positions=positions)
 
         self.assertEqual(logits.shape, (1, 8, 1000))
 
@@ -557,9 +556,7 @@ class TestModelDummy(unittest.TestCase):
         input_ids = torch.randint(0, 1000, (1, 8))
         positions = torch.arange(8)
         with torch.inference_mode():
-            logits = model(
-                input_ids=input_ids, positions=positions, forward_mode="prefill"
-            )
+            logits = model(input_ids=input_ids, positions=positions)
         self.assertEqual(logits.shape, (1, 8, 1000))
 
     def test_llama_model_create(self):
@@ -581,9 +578,7 @@ class TestModelDummy(unittest.TestCase):
         input_ids = torch.randint(0, 1000, (2, 6))
         positions = torch.arange(6)
         with torch.inference_mode():
-            logits = model(
-                input_ids=input_ids, positions=positions, forward_mode="prefill"
-            )
+            logits = model(input_ids=input_ids, positions=positions)
         self.assertEqual(logits.shape, (2, 6, 1000))
 
     def test_mistral_model_create(self):
@@ -606,9 +601,7 @@ class TestModelDummy(unittest.TestCase):
         input_ids = torch.randint(0, 1000, (1, 8))
         positions = torch.arange(8)
         with torch.inference_mode():
-            logits = model(
-                input_ids=input_ids, positions=positions, forward_mode="prefill"
-            )
+            logits = model(input_ids=input_ids, positions=positions)
         self.assertEqual(logits.shape, (1, 8, 1000))
 
     def test_deep_decoder_forward(self):
@@ -639,9 +632,7 @@ class TestModelDummy(unittest.TestCase):
         )
         positions = torch.arange(16)
         with torch.inference_mode():
-            logits = model(
-                input_ids=input_ids, positions=positions, forward_mode="prefill"
-            )
+            logits = model(input_ids=input_ids, positions=positions)
         self.assertFalse(torch.isnan(logits).any(), f"NaN in logits: {logits}")
         self.assertFalse(torch.isinf(logits).any(), f"Inf in logits: {logits}")
 
@@ -650,6 +641,7 @@ class TestModelDummy(unittest.TestCase):
 
         from minisgl.config import ModelArgs
         from minisgl.engine.kvcache.pool import KVCachePool
+        from minisgl.models.attention.metadata import AttentionMetadata
         from minisgl.models.qwen2 import Qwen2ForCausalLM
 
         config = ModelArgs(
@@ -678,6 +670,9 @@ class TestModelDummy(unittest.TestCase):
             device=torch.device("cpu"),
         )
         k_all, v_all = pool.get_all_kv_cache()
+        # Bind each layer to its own slice of the pool (what the engine does).
+        for i, layer in enumerate(model.model.layers):
+            layer.self_attn.set_kv_cache(k_all[i], v_all[i])
 
         # Prefill: 8 tokens, write to pages via flat indices
         input_ids = torch.randint(0, 1000, (1, 8))
@@ -689,10 +684,10 @@ class TestModelDummy(unittest.TestCase):
             logits = model(
                 input_ids=input_ids,
                 positions=positions,
-                k_cache=k_all,
-                v_cache=v_all,
-                write_loc=write_loc,
-                forward_mode="prefill",
+                attn_meta=AttentionMetadata(
+                    forward_mode="prefill",
+                    write_loc=write_loc,
+                ),
             )
 
         # Decode: 1 token, write to slot 8
@@ -708,12 +703,12 @@ class TestModelDummy(unittest.TestCase):
             logits = model(
                 input_ids=input_ids,
                 positions=positions,
-                k_cache=k_all,
-                v_cache=v_all,
-                write_loc=write_loc,
-                req_to_token=req_to_token,
-                cache_seqlens=cache_seqlens,
-                forward_mode="decode",
+                attn_meta=AttentionMetadata(
+                    forward_mode="decode",
+                    write_loc=write_loc,
+                    req_to_token=req_to_token,
+                    cache_seqlens=cache_seqlens,
+                ),
             )
         self.assertEqual(logits.shape, (1, 1, 1000))
 
@@ -746,9 +741,7 @@ class TestQwen3MoEModel(unittest.TestCase):
         input_ids = torch.randint(0, 1000, (1, 8))
         positions = torch.arange(8)
         with torch.inference_mode():
-            logits = model(
-                input_ids=input_ids, positions=positions, forward_mode="prefill"
-            )
+            logits = model(input_ids=input_ids, positions=positions)
         self.assertEqual(logits.shape, (1, 8, 1000))
 
     def test_moe_mlp_accepts_2d_input(self):
@@ -907,9 +900,7 @@ class TestSlidingWindow(unittest.TestCase):
         k = torch.randn(1, num_heads, seq_len, head_dim)
         v = torch.randn(1, num_heads, seq_len, head_dim)
 
-        out = PyTorchBackend.forward(
-            q, k, v, sliding_window=window, forward_mode="prefill"
-        )
+        out = PyTorchBackend.forward(q, k, v, sliding_window=window)
 
         pos = torch.arange(seq_len)
         allow = (pos.unsqueeze(0) <= pos.unsqueeze(1)) & (
@@ -924,6 +915,7 @@ class TestSlidingWindow(unittest.TestCase):
         """PT decode with sliding_window: keys older than the window are masked."""
         import torch.nn.functional as F
 
+        from minisgl.models.attention.metadata import AttentionMetadata
         from minisgl.models.attention.pt_backend import PyTorchBackend
 
         torch.manual_seed(0)
@@ -942,11 +934,14 @@ class TestSlidingWindow(unittest.TestCase):
             q,
             k_cache=k_cache,
             v_cache=v_cache,
-            req_to_token=req_to_token,
-            cache_seqlens=cache_seqlens,
-            max_seqlen=total,
+            attn_meta=AttentionMetadata(
+                forward_mode="decode",
+                write_loc=None,
+                req_to_token=req_to_token,
+                cache_seqlens=cache_seqlens,
+                max_seqlen=total,
+            ),
             sliding_window=window,
-            forward_mode="decode",
         )
 
         flat_k = k_cache.view(-1, num_heads, head_dim)[:total].transpose(0, 1)
@@ -970,6 +965,7 @@ class TestDecodeMatchesFullAttention(unittest.TestCase):
         over the whole sequence (query = last position only)."""
         import torch.nn.functional as F
 
+        from minisgl.models.attention.metadata import AttentionMetadata
         from minisgl.models.attention.pt_backend import PyTorchBackend
 
         torch.manual_seed(0)
@@ -992,10 +988,13 @@ class TestDecodeMatchesFullAttention(unittest.TestCase):
             q,
             k_cache=k_cache,
             v_cache=v_cache,
-            req_to_token=req_to_token,
-            cache_seqlens=cache_seqlens,
-            max_seqlen=total,
-            forward_mode="decode",
+            attn_meta=AttentionMetadata(
+                forward_mode="decode",
+                write_loc=None,
+                req_to_token=req_to_token,
+                cache_seqlens=cache_seqlens,
+                max_seqlen=total,
+            ),
         )
         ref = F.scaled_dot_product_attention(
             q, k_full, v_full, is_causal=False
@@ -1048,7 +1047,7 @@ class TestRegistry(unittest.TestCase):
             ids = torch.randint(0, 100, (1, 4))
             pos = torch.arange(4)
             with torch.inference_mode():
-                out = model(input_ids=ids, positions=pos, forward_mode="prefill")
+                out = model(input_ids=ids, positions=pos)
             self.assertEqual(out.shape, (1, 4, 100))
 
 
@@ -1200,9 +1199,7 @@ class TestOPTModel(unittest.TestCase):
         input_ids = torch.randint(0, 1000, (1, 8))
         positions = torch.arange(8)
         with torch.inference_mode():
-            logits = model(
-                input_ids=input_ids, positions=positions, forward_mode="prefill"
-            )
+            logits = model(input_ids=input_ids, positions=positions)
         self.assertEqual(logits.shape, (1, 8, 1000))
 
 
@@ -1244,12 +1241,15 @@ class TestDecodeManager(unittest.TestCase):
         self.assertEqual(batch.phase, "decode")
         self.assertEqual(batch.input_ids.tolist(), [[5]])
         self.assertEqual(batch.positions.tolist(), [[4]])
-        self.assertIsNotNone(batch.write_loc)
-        self.assertIsNotNone(batch.block_table)
-        self.assertIsNotNone(batch.cache_seqlens)
+        meta = batch.attn_meta
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta.forward_mode, "decode")
+        self.assertIsNotNone(meta.write_loc)
+        self.assertIsNotNone(meta.block_table)
+        self.assertIsNotNone(meta.cache_seqlens)
         # cache_seqlens semantics: total length including the current token.
-        self.assertEqual(batch.cache_seqlens.tolist(), [5])
-        self.assertEqual(batch.max_seqlen, 5)
+        self.assertEqual(meta.cache_seqlens.tolist(), [5])
+        self.assertEqual(meta.max_seqlen, 5)
 
     def test_schedule_decode_empty(self):
         from minisgl.config import ServerArgs
@@ -1364,7 +1364,7 @@ class TestSharedDecoder(unittest.TestCase):
         )
         x = torch.randn(1, 8, 128)
         positions = torch.arange(8)
-        out = layer(x, positions, forward_mode="prefill")
+        out = layer(x, positions)
         self.assertEqual(out.shape, (1, 8, 128))
 
     def test_llama_inherits_tie_weights(self):
@@ -1489,6 +1489,7 @@ class TestEndToEndScheduler(unittest.TestCase):
 # ── Test PyTorch Attention Decode Path ──
 class TestPyTorchBackendDecode(unittest.TestCase):
     def test_decode_with_valid_mask(self):
+        from minisgl.models.attention.metadata import AttentionMetadata
         from minisgl.models.attention.pt_backend import PyTorchBackend
 
         q = torch.randn(2, 4, 1, 32)
@@ -1506,14 +1507,44 @@ class TestPyTorchBackendDecode(unittest.TestCase):
             q[:, :, :, :],
             k_cache=k_cache,
             v_cache=v_cache,
-            req_to_token=req_to_token,
-            cache_seqlens=cache_seqlens,
-            forward_mode="decode",
+            attn_meta=AttentionMetadata(
+                forward_mode="decode",
+                write_loc=None,
+                req_to_token=req_to_token,
+                cache_seqlens=cache_seqlens,
+            ),
         )
         self.assertEqual(out.shape, (2, 4, 1, 32))
         self.assertFalse(torch.isnan(out).any())
 
+    def test_decode_missing_paged_metadata_raises(self):
+        """attn_meta exists but lacks the decode fields: error, not fallback."""
+        from minisgl.models.attention.metadata import AttentionMetadata
+        from minisgl.models.attention.pt_backend import PyTorchBackend
+
+        q = torch.randn(2, 4, 1, 32)
+        k_cache = torch.randn(10, 16, 4, 32)
+        v_cache = torch.randn(10, 16, 4, 32)
+        meta = AttentionMetadata(forward_mode="decode", write_loc=None)
+        with self.assertRaises(RuntimeError):
+            PyTorchBackend.forward(q, q, q, k_cache, v_cache, meta)
+
+    def test_none_attn_meta_is_plain_causal(self):
+        """attn_meta=None must equal plain causal SDPA without a KV cache."""
+        import torch.nn.functional as F
+
+        from minisgl.models.attention.pt_backend import PyTorchBackend
+
+        torch.manual_seed(0)
+        q = torch.randn(1, 4, 8, 32)
+        k = torch.randn(1, 4, 8, 32)
+        v = torch.randn(1, 4, 8, 32)
+        out = PyTorchBackend.forward(q, k, v)
+        ref = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        self.assertTrue(torch.allclose(out, ref, atol=1e-6))
+
     def test_prefill_varlen(self):
+        from minisgl.models.attention.metadata import AttentionMetadata
         from minisgl.models.attention.pt_backend import PyTorchBackend
 
         q = torch.randn(1, 4, 8, 32)
@@ -1522,7 +1553,14 @@ class TestPyTorchBackendDecode(unittest.TestCase):
         cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32)
 
         out = PyTorchBackend.forward(
-            q, k, v, cu_seqlens_q=cu_seqlens, forward_mode="prefill"
+            q,
+            k,
+            v,
+            attn_meta=AttentionMetadata(
+                forward_mode="prefill",
+                write_loc=None,
+                cu_seqlens_q=cu_seqlens,
+            ),
         )
         self.assertEqual(out.shape, (1, 4, 8, 32))
         self.assertFalse(torch.isnan(out).any())
@@ -1532,6 +1570,7 @@ class TestPyTorchBackendDecode(unittest.TestCase):
         # causal prefill over the whole sequence.
         import torch.nn.functional as F
 
+        from minisgl.models.attention.metadata import AttentionMetadata
         from minisgl.models.attention.pt_backend import PyTorchBackend
 
         torch.manual_seed(0)
@@ -1559,10 +1598,13 @@ class TestPyTorchBackendDecode(unittest.TestCase):
             v_full[:, :, cached:, :],
             k_cache=k_cache,
             v_cache=v_cache,
-            cu_seqlens_q=cu_seqlens,
-            prefix_lens=prefix_lens,
-            req_to_token=req_to_token,
-            forward_mode="prefill",
+            attn_meta=AttentionMetadata(
+                forward_mode="prefill",
+                write_loc=None,
+                cu_seqlens_q=cu_seqlens,
+                prefix_lens=prefix_lens,
+                req_to_token=req_to_token,
+            ),
         )
         ref = F.scaled_dot_product_attention(q_full, k_full, v_full, is_causal=True)[
             :, :, cached:, :
@@ -1968,7 +2010,8 @@ class TestWriteLocGuard(unittest.TestCase):
         v = torch.randn(1, num_kv_heads, 3, head_dim)
         write_loc = torch.tensor([0, -1, 5], dtype=torch.int32)
 
-        attn._write_kv_cache(k, v, k_cache, v_cache, write_loc)
+        attn.set_kv_cache(k_cache, v_cache)
+        attn._write_kv_cache(k, v, write_loc)
 
         flat_k = k_cache.view(-1, num_kv_heads, head_dim)
         flat_v = v_cache.view(-1, num_kv_heads, head_dim)
@@ -2088,7 +2131,7 @@ class TestServerArgsDevice(unittest.TestCase):
         q = torch.randn(1, 4, 8, 32)
         k = torch.randn(1, 4, 8, 32)
         v = torch.randn(1, 4, 8, 32)
-        out = AttentionBackend.forward(q, k, v, forward_mode="prefill")
+        out = AttentionBackend.forward(q, k, v)
         self.assertEqual(out.shape, q.shape)
         AttentionBackend.configure("fa")
 

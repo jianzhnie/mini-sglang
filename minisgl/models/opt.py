@@ -18,6 +18,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from minisgl.config import ModelArgs
+from minisgl.models.attention.metadata import AttentionMetadata
 from minisgl.models.decoder import gather_last_logits
 from minisgl.models.layers.attention import BaseAttention
 from minisgl.models.layers.embedding import VocabParallelEmbedding
@@ -115,17 +117,12 @@ class OPTDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
         residual: torch.Tensor | None = None,
-        k_cache: torch.Tensor | None = None,
-        v_cache: torch.Tensor | None = None,
-        write_loc: torch.Tensor | None = None,
-        **kwargs,
+        attn_meta: AttentionMetadata | None = None,
     ) -> torch.Tensor:
         if residual is None:
             residual = hidden_states
         normed = self.self_attn_layer_norm(hidden_states)
-        attn_out = self.self_attn(
-            normed, positions, k_cache, v_cache, write_loc, **kwargs
-        )
+        attn_out = self.self_attn(normed, positions, attn_meta)
         hidden_states = attn_out + residual
 
         residual = hidden_states
@@ -144,7 +141,7 @@ class OPTModel(nn.Module):
     simplification), so logits differ from HF OPT by that offset.
     """
 
-    def __init__(self, config) -> None:
+    def __init__(self, config: ModelArgs) -> None:
         super().__init__()
         self.config = config
         self.embed_tokens = VocabParallelEmbedding(
@@ -170,28 +167,15 @@ class OPTModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        k_cache: torch.Tensor | None = None,
-        v_cache: torch.Tensor | None = None,
-        write_loc: torch.Tensor | None = None,
-        **kwargs,
+        attn_meta: AttentionMetadata | None = None,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         pos_emb = self.embed_positions(positions)
         hidden_states = hidden_states + pos_emb
 
         residual = None
-        for i, layer in enumerate(self.layers):
-            layer_k_cache = k_cache[i] if k_cache is not None else None
-            layer_v_cache = v_cache[i] if v_cache is not None else None
-            hidden_states = layer(
-                hidden_states,
-                positions,
-                residual,
-                layer_k_cache,
-                layer_v_cache,
-                write_loc,
-                **kwargs,
-            )
+        for layer in self.layers:
+            hidden_states = layer(hidden_states, positions, residual, attn_meta)
 
         hidden_states = self.final_layer_norm(hidden_states)
         return hidden_states
@@ -200,7 +184,7 @@ class OPTModel(nn.Module):
 class OPTForCausalLM(nn.Module):
     """OPT model with language modeling head."""
 
-    def __init__(self, config) -> None:
+    def __init__(self, config: ModelArgs) -> None:
         super().__init__()
         self.model = OPTModel(config)
         self.lm_head = ColumnParallelLinear(
@@ -212,20 +196,15 @@ class OPTForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        k_cache: torch.Tensor | None = None,
-        v_cache: torch.Tensor | None = None,
-        write_loc: torch.Tensor | None = None,
+        attn_meta: AttentionMetadata | None = None,
         logits_indices: torch.Tensor | None = None,
-        **kwargs,
     ) -> torch.Tensor:
-        hidden_states = self.model(
-            input_ids, positions, k_cache, v_cache, write_loc, **kwargs
-        )
+        hidden_states = self.model(input_ids, positions, attn_meta)
         if logits_indices is not None:
             hidden_states = gather_last_logits(hidden_states, logits_indices)
         return self.lm_head(hidden_states)
 
-    def tie_weights(self, state_dict: dict) -> None:
+    def tie_weights(self, state_dict: dict[str, torch.Tensor]) -> None:
         """Tie lm_head weight to embed_tokens when config says so.
 
         HF OPT checkpoints with tie_word_embeddings=True omit lm_head.weight;

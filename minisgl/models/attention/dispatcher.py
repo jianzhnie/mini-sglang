@@ -20,6 +20,7 @@ from minisgl.models.attention.fa_backend import (
     FlashAttentionBackend,
     FlashInferBackend,
 )
+from minisgl.models.attention.metadata import AttentionMetadata
 from minisgl.models.attention.pt_backend import PyTorchBackend
 
 
@@ -48,8 +49,8 @@ class AttentionBackend:
         v: torch.Tensor,
         k_cache: torch.Tensor | None = None,
         v_cache: torch.Tensor | None = None,
-        write_loc: torch.Tensor | None = None,
-        **kwargs,
+        attn_meta: AttentionMetadata | None = None,
+        sliding_window: int | None = None,
     ) -> torch.Tensor:
         """Compute attention output. Routes to the configured backend.
 
@@ -65,18 +66,18 @@ class AttentionBackend:
 
         if backend == "pt":
             return PyTorchBackend.forward(
-                q, k, v, k_cache, v_cache, write_loc, **kwargs
+                q, k, v, k_cache, v_cache, attn_meta, sliding_window
             )
 
         if "fi" in backend and _FLASHINFER_AVAILABLE:
             return FlashInferBackend.forward(
-                q, k, v, k_cache, v_cache, write_loc, **kwargs
+                q, k, v, k_cache, v_cache, attn_meta, sliding_window
             )
         elif _FLASH_ATTN_AVAILABLE:
             return FlashAttentionBackend.forward(
-                q, k, v, k_cache, v_cache, write_loc, **kwargs
+                q, k, v, k_cache, v_cache, attn_meta, sliding_window
             )
         else:
             return PyTorchBackend.forward(
-                q, k, v, k_cache, v_cache, write_loc, **kwargs
+                q, k, v, k_cache, v_cache, attn_meta, sliding_window
             )

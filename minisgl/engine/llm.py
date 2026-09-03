@@ -59,7 +59,7 @@ class LLM:
     def __enter__(self) -> "LLM":
         return self
 
-    def __exit__(self, *args) -> None:
+    def __exit__(self, *args: object) -> None:
         self.cleanup()
 
     def cleanup(self) -> None:

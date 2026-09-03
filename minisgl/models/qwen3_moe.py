@@ -20,6 +20,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from minisgl.config import ModelArgs
+from minisgl.models.attention.metadata import AttentionMetadata
 from minisgl.models.decoder import (
     GatedMLP,
     RMSNormDecoderLayer,
@@ -133,7 +135,7 @@ class Qwen3MoEMLP(nn.Module):
 class Qwen3MoEModel(nn.Module):
     """Qwen3-MoE transformer model with sparse MoE layers."""
 
-    def __init__(self, config) -> None:
+    def __init__(self, config: ModelArgs) -> None:
         super().__init__()
         self.config = config
         self.embed_tokens = VocabParallelEmbedding(
@@ -150,7 +152,9 @@ class Qwen3MoEModel(nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     @staticmethod
-    def _make_layer(config, layer_idx: int, sparse_step: int) -> RMSNormDecoderLayer:
+    def _make_layer(
+        config: ModelArgs, layer_idx: int, sparse_step: int
+    ) -> RMSNormDecoderLayer:
         is_moe = layer_idx % sparse_step == sparse_step - 1
         mlp: nn.Module
         if is_moe:
@@ -173,25 +177,12 @@ class Qwen3MoEModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        k_cache: torch.Tensor | None = None,
-        v_cache: torch.Tensor | None = None,
-        write_loc: torch.Tensor | None = None,
-        **kwargs,
+        attn_meta: AttentionMetadata | None = None,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
-        for i, layer in enumerate(self.layers):
-            layer_k_cache = k_cache[i] if k_cache is not None else None
-            layer_v_cache = v_cache[i] if v_cache is not None else None
-            hidden_states = layer(
-                hidden_states,
-                positions,
-                residual,
-                layer_k_cache,
-                layer_v_cache,
-                write_loc,
-                **kwargs,
-            )
+        for layer in self.layers:
+            hidden_states = layer(hidden_states, positions, residual, attn_meta)
         hidden_states, _ = self.norm(hidden_states)
         return hidden_states
 
@@ -199,11 +190,11 @@ class Qwen3MoEModel(nn.Module):
 class Qwen3MoEForCausalLM(RMSNormForCausalLM):
     """Qwen3-MoE with language modeling head."""
 
-    def __init__(self, config) -> None:
+    def __init__(self, config: ModelArgs) -> None:
         model = Qwen3MoEModel(config)
         super().__init__(model, config)
 
-    def load_hf_experts(self, state_dict: dict) -> int:
+    def load_hf_experts(self, state_dict: dict[str, torch.Tensor]) -> int:
         """Aggregate HF per-expert weights into the fused expert tensors.
 
         HF stores experts as mlp.experts.{i}.{gate_proj,up_proj,down_proj}.weight,

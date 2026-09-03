@@ -5,6 +5,7 @@ import torch
 
 from minisgl.config import ServerArgs
 from minisgl.engine.kvcache.pool import KVCachePool
+from minisgl.models.attention.metadata import AttentionMetadata
 from minisgl.scheduler.batch import Batch, Req
 
 
@@ -21,7 +22,6 @@ class DecodeManager:
         args: ServerArgs,
         pool: KVCachePool,
         device: torch.device | None = None,
-        **_kwargs,
     ) -> None:
         self.max_running_req = args.max_running_req
         self.max_seq_len = args.max_seq_len
@@ -128,10 +128,13 @@ class DecodeManager:
 
         batch.input_ids = self._input_ids_buf[:num_reqs]
         batch.positions = self._positions_buf[:num_reqs]
-        batch.write_loc = self._write_loc_buf[:num_reqs].clone()
-        batch.cache_seqlens = self._cache_seqlens_buf[:num_reqs].clone()
-        batch.block_table = self._block_table_buf[:num_reqs]
-        batch.req_to_token = self._req_to_token_buf[:num_reqs]
-        # Python int, so attention backends can size gathers without .item().
-        batch.max_seqlen = max_seqlen
+        batch.attn_meta = AttentionMetadata(
+            forward_mode="decode",
+            write_loc=self._write_loc_buf[:num_reqs].clone(),
+            block_table=self._block_table_buf[:num_reqs],
+            req_to_token=self._req_to_token_buf[:num_reqs],
+            cache_seqlens=self._cache_seqlens_buf[:num_reqs].clone(),
+            # Python int, so attention backends can size gathers without .item().
+            max_seqlen=max_seqlen,
+        )
         return batch

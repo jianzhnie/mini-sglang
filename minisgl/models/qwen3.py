@@ -11,6 +11,7 @@ __all__ = [
 ]
 import torch
 
+from minisgl.config import ModelArgs
 from minisgl.models.decoder import RMSNormForCausalLM, RMSNormModel
 from minisgl.models.layers.attention import BaseAttention
 from minisgl.models.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -22,7 +23,7 @@ from minisgl.utils.device import get_tp_size
 class Qwen3Attention(BaseAttention):
     """Multi-head attention for Qwen3 with QK normalization and RoPE."""
 
-    def __init__(self, config) -> None:
+    def __init__(self, config: ModelArgs) -> None:
         super().__init__()
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_kv_heads
@@ -69,6 +70,6 @@ class Qwen3Attention(BaseAttention):
 class Qwen3ForCausalLM(RMSNormForCausalLM):
     """Qwen3 model with language modeling head."""
 
-    def __init__(self, config) -> None:
+    def __init__(self, config: ModelArgs) -> None:
         model = RMSNormModel(config, attention_cls=Qwen3Attention)
         super().__init__(model, config)

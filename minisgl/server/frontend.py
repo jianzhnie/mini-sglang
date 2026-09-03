@@ -13,6 +13,7 @@ import json
 import queue
 import threading
 import time
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -21,6 +22,9 @@ from pydantic import BaseModel
 from minisgl.config import SamplingParams, ServerArgs
 from minisgl.scheduler.scheduler import Scheduler
 from minisgl.utils.logger import logger
+
+if TYPE_CHECKING:
+    from minisgl.models.tokenizer.worker import TokenizerWorker
 
 app = FastAPI(title="Mini-SGLang", version="0.1.0")
 
@@ -63,7 +67,10 @@ class FrontendManager:
     """Manages the lifecycle of inference requests and SSE streaming."""
 
     def __init__(
-        self, server_args: ServerArgs, scheduler: Scheduler, tokenizer_worker
+        self,
+        server_args: ServerArgs,
+        scheduler: Scheduler,
+        tokenizer_worker: "TokenizerWorker",
     ) -> None:
         self.args = server_args
         self.scheduler = scheduler
@@ -136,7 +143,7 @@ _frontend: FrontendManager | None = None
 def init_frontend(
     server_args: ServerArgs,
     scheduler: Scheduler,
-    tokenizer_worker,
+    tokenizer_worker: "TokenizerWorker",
 ) -> FrontendManager:
     global _frontend
     _frontend = FrontendManager(server_args, scheduler, tokenizer_worker)
@@ -152,7 +159,7 @@ class IncrementalDetokenizer:
     characters.
     """
 
-    def __init__(self, tokenizer) -> None:
+    def __init__(self, tokenizer: "TokenizerWorker") -> None:
         self.tokenizer = tokenizer
         self.token_ids: list[int] = []
         self.text = ""
