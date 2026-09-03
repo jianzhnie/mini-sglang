@@ -13,11 +13,11 @@ if TYPE_CHECKING:
 __all__ = ["Engine"]
 import torch
 
-from minisgl.engine.context import BatchContext
+from minisgl.engine.batch_context import BatchContext
 from minisgl.engine.kvcache.pool import BaseCacheHandle, KVCachePool
 from minisgl.models.attention.dispatcher import AttentionBackend
+from minisgl.models.attention.layer import BaseAttention
 from minisgl.models.attention.metadata import AttentionMetadata
-from minisgl.models.layers.attention import BaseAttention
 from minisgl.models.layers.rope import RotaryEmbedding
 from minisgl.sampling.sampler import Sampler
 from minisgl.utils.device import (

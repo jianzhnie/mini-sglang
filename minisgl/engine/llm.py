@@ -12,8 +12,8 @@ import time
 
 from minisgl.config import ModelArgs, SamplingParams, ServerArgs
 from minisgl.engine.engine import Engine
-from minisgl.models.tokenizer.worker import TokenizerWorker
 from minisgl.scheduler.scheduler import Scheduler
+from minisgl.tokenizer import TokenizerWorker
 from minisgl.utils.logger import logger
 
 

@@ -1,7 +1,8 @@
-"""PyNCCL: Python wrapper for NCCL collective operations.
+"""Collective communication primitives with NCCL/HCCL dual backends.
 
 Uses torch.distributed as the backend for collective operations
-(all_reduce, all_gather, broadcast) used in tensor parallelism.
+(all_reduce, all_gather, broadcast) used in tensor parallelism, covering
+both NCCL (GPU) and HCCL (NPU) backends.
 """
 
 __all__ = ["all_gather", "all_reduce", "barrier", "broadcast"]

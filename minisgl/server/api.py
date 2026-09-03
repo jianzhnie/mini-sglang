@@ -24,7 +24,7 @@ from minisgl.scheduler.scheduler import Scheduler
 from minisgl.utils.logger import logger
 
 if TYPE_CHECKING:
-    from minisgl.models.tokenizer.worker import TokenizerWorker
+    from minisgl.tokenizer import TokenizerWorker
 
 app = FastAPI(title="Mini-SGLang", version="0.1.0")
 

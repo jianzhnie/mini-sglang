@@ -328,7 +328,7 @@ class TestSchedulerBatch(unittest.TestCase):
 
     def test_context_prepare(self):
         from minisgl.config import SamplingParams
-        from minisgl.engine.context import BatchContext
+        from minisgl.engine.batch_context import BatchContext
         from minisgl.engine.kvcache.pool import KVCachePool
         from minisgl.scheduler.batch import Batch, Req
 
@@ -368,14 +368,14 @@ class TestSchedulerBatch(unittest.TestCase):
 # ── Test Distributed ──
 class TestDistributed(unittest.TestCase):
     def test_all_reduce_noop(self):
-        from minisgl.engine.distributed.pynccl import all_reduce
+        from minisgl.engine.distributed.collectives import all_reduce
 
         x = torch.randn(10)
         y = all_reduce(x)
         self.assertTrue(torch.equal(x, y))  # no-op when not distributed
 
     def test_all_reduce_invalid_op_raises(self):
-        from minisgl.engine.distributed.pynccl import all_reduce
+        from minisgl.engine.distributed.collectives import all_reduce
 
         with self.assertRaises(ValueError):
             all_reduce(torch.randn(4), op="avg")
@@ -490,7 +490,7 @@ class TestTokenizerWorker(unittest.TestCase):
     )
     def test_tokenizer_creation(self):
         """Test with a tiny tokenizer (requires transformers)."""
-        from minisgl.models.tokenizer.worker import TokenizerWorker
+        from minisgl.tokenizer import TokenizerWorker
 
         # Use a model that's likely cached or small
         try:
@@ -1334,7 +1334,7 @@ class TestPrefillManager(unittest.TestCase):
 # ── Test Shared Decoder Base Classes ──
 class TestSharedDecoder(unittest.TestCase):
     def test_gated_mlp(self):
-        from minisgl.models.decoder import GatedMLP
+        from minisgl.models.base import GatedMLP
 
         mlp = GatedMLP(128, 512)
         x = torch.randn(2, 8, 128)
@@ -1343,7 +1343,7 @@ class TestSharedDecoder(unittest.TestCase):
 
     def test_rmsnorm_decoder_layer(self):
         from minisgl.config import ModelArgs
-        from minisgl.models.decoder import RMSNormDecoderLayer
+        from minisgl.models.base import RMSNormDecoderLayer
         from minisgl.models.llama import LlamaAttention
 
         config = ModelArgs(
@@ -1368,7 +1368,7 @@ class TestSharedDecoder(unittest.TestCase):
         self.assertEqual(out.shape, (1, 8, 128))
 
     def test_llama_inherits_tie_weights(self):
-        from minisgl.models.decoder import RMSNormForCausalLM
+        from minisgl.models.base import RMSNormForCausalLM
         from minisgl.models.llama import LlamaForCausalLM
 
         self.assertTrue(issubclass(LlamaForCausalLM, RMSNormForCausalLM))
@@ -1671,7 +1671,7 @@ class TestFrontendManager(unittest.TestCase):
     @staticmethod
     def _make_frontend(scheduler):
         from minisgl.config import ServerArgs
-        from minisgl.server.frontend import FrontendManager
+        from minisgl.server.api import FrontendManager
 
         args = ServerArgs(model_path="/tmp/test")
         return FrontendManager(args, scheduler, None)
@@ -1738,20 +1738,20 @@ class TestFrontendManager(unittest.TestCase):
         fm.process_step()
 
     def test_stream_timeout_aborts_request(self):
-        import minisgl.server.frontend as frontend
+        import minisgl.server.api as api
         from minisgl.config import SamplingParams
 
         scheduler = self._MockScheduler()
         fm = self._make_frontend(scheduler)
 
-        old_frontend, old_timeout = frontend._frontend, frontend.REQUEST_TIMEOUT
-        frontend._frontend, frontend.REQUEST_TIMEOUT = fm, 0.01
+        old_frontend, old_timeout = api._frontend, api.REQUEST_TIMEOUT
+        api._frontend, api.REQUEST_TIMEOUT = fm, 0.01
         try:
             uid = fm.submit_request([1, 2, 3], SamplingParams())
             result_queue = fm.get_result_queue(uid)
-            chunks = list(frontend._stream_chat_response(uid, result_queue, "m"))
+            chunks = list(api._stream_chat_response(uid, result_queue, "m"))
         finally:
-            frontend._frontend, frontend.REQUEST_TIMEOUT = old_frontend, old_timeout
+            api._frontend, api.REQUEST_TIMEOUT = old_frontend, old_timeout
 
         # Timed-out stream reports an error chunk instead of a silent [DONE],
         # aborts the scheduler-side request, and cleans up the result queue.
@@ -1763,7 +1763,7 @@ class TestFrontendManager(unittest.TestCase):
 # ── Test Incremental Detokenizer ──
 class TestIncrementalDetokenizer(unittest.TestCase):
     def test_multibyte_char_split_across_tokens(self):
-        from minisgl.server.frontend import IncrementalDetokenizer
+        from minisgl.server.api import IncrementalDetokenizer
 
         class MockTokenizer:
             # Byte-level style: tokens 1/2 are the two halves of "中"; decoding
@@ -1779,7 +1779,7 @@ class TestIncrementalDetokenizer(unittest.TestCase):
         self.assertNotIn("\ufffd", "".join(pieces))
 
     def test_ascii_stream(self):
-        from minisgl.server.frontend import IncrementalDetokenizer
+        from minisgl.server.api import IncrementalDetokenizer
 
         class MockTokenizer:
             def decode(self, ids, skip_special_tokens=True):

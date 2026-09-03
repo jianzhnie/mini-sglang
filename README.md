@@ -53,16 +53,16 @@ minisgl/
 ├── __main__.py          # `python -m minisgl` 入口（调 cli.main）
 ├── engine/
 │   ├── engine.py        # 推理引擎：模型加载、forward、CUDA Graph
-│   ├── context.py       # BatchContext：批次张量管理
+│   ├── batch_context.py # BatchContext：批次张量管理
 │   ├── llm.py           # 高层 LLM API（离线推理）
 │   ├── kvcache/
 │   │   ├── pool.py      # KV Cache 页式内存池
 │   │   ├── radix.py     # Radix Tree 前缀共享缓存
 │   │   └── naive.py     # 简化缓存（无前缀共享、不保留页）
 │   └── distributed/
-│       └── pynccl.py    # NCCL 通信原语封装
+│       └── collectives.py # NCCL/HCCL 双后端通信原语封装
 ├── models/
-│   ├── decoder.py       # 共享基类：GatedMLP, RMSNormDecoderLayer, RMSNormForCausalLM
+│   ├── base.py          # 共享基类：GatedMLP, RMSNormDecoderLayer, RMSNormForCausalLM
 │   ├── opt.py           # OPT 模型（LayerNorm + 可学习位置编码 + ReLU FFN）
 │   ├── qwen2.py         # Qwen2 模型（RMSNorm + Gated MLP + Q/K bias）
 │   ├── qwen3.py         # Qwen3 模型（+ QK LayerNorm + GQA）
@@ -71,18 +71,17 @@ minisgl/
 │   ├── mistral.py       # Mistral 模型（+ Sliding Window Attention）
 │   ├── registry.py      # 模型注册与自动检测
 │   ├── layers/
-│   │   ├── attention.py # BaseAttention 模板方法
 │   │   ├── rms_norm.py  # RMSNorm（含 fused residual add）
 │   │   ├── rope.py      # Rotary Position Embedding
 │   │   ├── linear.py    # Column / Row Parallel Linear
 │   │   └── embedding.py # Vocab Parallel Embedding
-│   ├── attention/
-│   │   ├── metadata.py    # AttentionMetadata：类型化的批次级 attention 输入（取代 kwargs 透传链）
-│   │   ├── dispatcher.py # AttentionBackend 静态路由器（fa / pt / fi 选择）
-│   │   ├── pt_backend.py  # PyTorch SDPA 后端（CPU/NPU 可用，支持滑窗与 extend）
-│   │   └── fa_backend.py  # FlashAttention 后端（FlashInfer 为转调 FA 的占位）
-│   └── tokenizer/
-│       └── worker.py    # HF Tokenizer Worker
+│   └── attention/
+│       ├── layer.py       # BaseAttention 模板方法
+│       ├── metadata.py    # AttentionMetadata：类型化的批次级 attention 输入（取代 kwargs 透传链）
+│       ├── dispatcher.py # AttentionBackend 静态路由器（fa / pt / fi 选择）
+│       ├── pt_backend.py  # PyTorch SDPA 后端（CPU/NPU 可用，支持滑窗与 extend）
+│       └── fa_backend.py  # FlashAttention 后端（FlashInfer 为转调 FA 的占位）
+├── tokenizer.py         # HF Tokenizer Worker（进程内调用）
 ├── scheduler/
 │   ├── scheduler.py     # 主调度器：prefill/decode 协调
 │   ├── prefill.py       # PrefillManager：pending 队列 + 令牌预算
@@ -91,7 +90,7 @@ minisgl/
 ├── sampling/
 │   └── sampler.py       # 采样器：greedy / top-k / top-p / temperature
 ├── server/
-│   └── frontend.py      # FastAPI 服务：SSE 流式 + OpenAI 兼容端点
+│   └── api.py           # FastAPI 服务：SSE 流式 + OpenAI 兼容端点
 └── utils/
     ├── device.py         # 设备管理（CUDA/NPU/CPU）+ 分布式初始化（NCCL/HCCL）
     ├── logger.py         # 统一日志
@@ -100,7 +99,7 @@ minisgl/
 
 ### 模型继承结构
 
-Qwen2 / Qwen3 / Llama / Mistral 共用 `decoder.py` 中的基类，消除重复代码：
+Qwen2 / Qwen3 / Llama / Mistral 共用 `base.py` 中的基类，消除重复代码：
 
 ```
 RMSNormForCausalLM          ← Qwen2/Qwen3/Llama/Mistral/Qwen3MoE 继承

@@ -19,9 +19,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from minisgl.config import ModelArgs
+from minisgl.models.attention.layer import BaseAttention
 from minisgl.models.attention.metadata import AttentionMetadata
-from minisgl.models.decoder import gather_last_logits
-from minisgl.models.layers.attention import BaseAttention
+from minisgl.models.base import gather_last_logits
 from minisgl.models.layers.embedding import VocabParallelEmbedding
 from minisgl.models.layers.linear import ColumnParallelLinear, RowParallelLinear
 from minisgl.utils.device import get_tp_rank, get_tp_size

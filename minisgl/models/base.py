@@ -15,8 +15,8 @@ import torch
 import torch.nn as nn
 
 from minisgl.config import ModelArgs
+from minisgl.models.attention.layer import BaseAttention
 from minisgl.models.attention.metadata import AttentionMetadata
-from minisgl.models.layers.attention import BaseAttention
 from minisgl.models.layers.embedding import VocabParallelEmbedding
 from minisgl.models.layers.linear import ColumnParallelLinear, RowParallelLinear
 from minisgl.models.layers.rms_norm import RMSNorm

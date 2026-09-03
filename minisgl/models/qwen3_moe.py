@@ -22,7 +22,7 @@ import torch.nn.functional as F
 
 from minisgl.config import ModelArgs
 from minisgl.models.attention.metadata import AttentionMetadata
-from minisgl.models.decoder import (
+from minisgl.models.base import (
     GatedMLP,
     RMSNormDecoderLayer,
     RMSNormForCausalLM,

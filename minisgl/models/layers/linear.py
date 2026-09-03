@@ -45,7 +45,7 @@ class ColumnParallelLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = F.linear(x, self.weight, self.bias)
         if self.gather_output and is_distributed():
-            from minisgl.engine.distributed.pynccl import all_gather
+            from minisgl.engine.distributed.collectives import all_gather
 
             out = all_gather(out, dim=-1)
         return out
@@ -83,7 +83,7 @@ class RowParallelLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = F.linear(x, self.weight)
         if is_distributed():
-            from minisgl.engine.distributed.pynccl import all_reduce
+            from minisgl.engine.distributed.collectives import all_reduce
 
             out = all_reduce(out)
         if self.bias is not None:

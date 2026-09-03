@@ -12,8 +12,8 @@ __all__ = [
 import torch
 
 from minisgl.config import ModelArgs
-from minisgl.models.decoder import RMSNormForCausalLM, RMSNormModel
-from minisgl.models.layers.attention import BaseAttention
+from minisgl.models.attention.layer import BaseAttention
+from minisgl.models.base import RMSNormForCausalLM, RMSNormModel
 from minisgl.models.layers.linear import ColumnParallelLinear, RowParallelLinear
 from minisgl.models.layers.rope import RotaryEmbedding
 from minisgl.utils.device import get_tp_size

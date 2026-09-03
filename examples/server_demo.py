@@ -91,9 +91,9 @@ def start_server(model_path: str):
 
     from minisgl.config import ModelArgs, ServerArgs
     from minisgl.engine.engine import Engine
-    from minisgl.models.tokenizer.worker import TokenizerWorker
     from minisgl.scheduler.scheduler import Scheduler
-    from minisgl.server.frontend import app, init_frontend
+    from minisgl.server.api import app, init_frontend
+    from minisgl.tokenizer import TokenizerWorker
     from minisgl.utils.logger import setup_logger
 
     setup_logger(level=logging.INFO)

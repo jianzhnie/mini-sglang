@@ -12,8 +12,8 @@ import logging
 from minisgl.config import ModelArgs, ServerArgs
 from minisgl.engine.engine import Engine
 from minisgl.engine.llm import LLM
-from minisgl.models.tokenizer.worker import TokenizerWorker
 from minisgl.scheduler.scheduler import Scheduler
+from minisgl.tokenizer import TokenizerWorker
 from minisgl.utils.logger import setup_logger
 
 
@@ -104,7 +104,7 @@ def run_server(args: ServerArgs) -> None:
     """Launch the HTTP server with scheduler in background thread."""
     import uvicorn
 
-    from minisgl.server.frontend import app, init_frontend
+    from minisgl.server.api import app, init_frontend
 
     log_level = args.log_level
     setup_logger(level=getattr(logging, log_level))

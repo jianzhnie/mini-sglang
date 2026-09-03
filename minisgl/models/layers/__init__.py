@@ -1,6 +1,10 @@
-"""Shared model layers: attention, embedding, linear, normalization, RoPE."""
+"""Shared model layers: embedding, linear, normalization, RoPE.
 
-from minisgl.models.layers.attention import BaseAttention
+BaseAttention is re-exported here for convenience; its implementation now
+lives in ``minisgl.models.attention.layer``.
+"""
+
+from minisgl.models.attention.layer import BaseAttention
 from minisgl.models.layers.embedding import VocabParallelEmbedding
 from minisgl.models.layers.linear import ColumnParallelLinear, RowParallelLinear
 from minisgl.models.layers.rms_norm import RMSNorm
