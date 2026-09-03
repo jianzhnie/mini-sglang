@@ -55,8 +55,8 @@ def gather_last_logits(
 class RMSNormDecoderLayer(nn.Module):
     """Single transformer decoder layer: RMSNorm -> Attention -> RMSNorm -> MLP.
 
-    Shared by Qwen2, Qwen3, Llama, and Mistral.
-    Accepts pre-built attention and MLP modules for flexibility.
+    Shared by the Qwen3 family. Accepts a pre-built MLP (e.g. an MoE block) or
+    builds a standard GatedMLP from ``intermediate_size``.
     """
 
     def __init__(
@@ -92,16 +92,16 @@ class RMSNormDecoderLayer(nn.Module):
 
 
 class RMSNormModel(nn.Module):
-    """Shared transformer backbone for RMSNorm-based decoder models.
+    """Shared transformer backbone for the Qwen3 family.
 
-    Embeds tokens, applies positional encoding (via layers), runs decoder stack.
+    Embeds tokens, applies RoPE (via the attention layers), runs the decoder
+    stack with residual flow.
     """
 
     def __init__(
         self,
         config: ModelArgs,
         attention_cls: type[BaseAttention],
-        mlp_cls: type[GatedMLP] | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -114,11 +114,6 @@ class RMSNormModel(nn.Module):
                     hidden_size=config.hidden_size,
                     rms_norm_eps=config.rms_norm_eps,
                     attention=attention_cls(config),
-                    mlp=(
-                        mlp_cls(config.hidden_size, config.intermediate_size)
-                        if mlp_cls is not None
-                        else None
-                    ),
                     intermediate_size=config.intermediate_size,
                 )
                 for _ in range(config.num_layers)

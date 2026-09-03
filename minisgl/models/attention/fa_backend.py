@@ -49,7 +49,6 @@ class FlashAttentionBackend:
         k_cache: torch.Tensor | None = None,
         v_cache: torch.Tensor | None = None,
         attn_meta: AttentionMetadata | None = None,
-        sliding_window: int | None = None,
     ) -> torch.Tensor:
         if not _FLASH_ATTN_AVAILABLE:
             msg = "flash-attn not installed"
@@ -59,9 +58,6 @@ class FlashAttentionBackend:
         # GQA: k/v carry their own (smaller) head count — never reshape
         # them with q's num_heads.
         num_kv_heads = k.shape[1]
-
-        # Sliding window (Mistral): FA expects (left, right) offsets.
-        window_size = (sliding_window - 1, 0) if sliding_window else (-1, -1)
 
         # Decode: use paged KV cache
         if attn_meta is not None and attn_meta.forward_mode == "decode":
@@ -75,7 +71,6 @@ class FlashAttentionBackend:
                 cache_seqlens=attn_meta.cache_seqlens,
                 softmax_scale=1.0 / math.sqrt(head_dim),
                 causal=True,
-                window_size=window_size,
             ).transpose(1, 2)
 
         # Prefill (attn_meta=None is a single cache-less causal sequence).
@@ -110,7 +105,6 @@ class FlashAttentionBackend:
                     cu_seqlens_q,
                     prefix_lens,
                     block_table,
-                    window_size=window_size,
                 )
                 .view(batch, seq_len, num_heads, head_dim)
                 .transpose(1, 2)
@@ -137,7 +131,6 @@ class FlashAttentionBackend:
             cu_seqlens_k=cu_seqlens_q,
             softmax_scale=1.0 / math.sqrt(head_dim),
             causal=True,
-            window_size=window_size,
         )
         return out.view(batch, seq_len, num_heads, head_dim).transpose(1, 2)
 
@@ -149,7 +142,6 @@ class FlashAttentionBackend:
         cu_seqlens: torch.Tensor,
         prefix_lens: torch.Tensor,
         block_table: torch.Tensor,
-        window_size: tuple[int, int] = (-1, -1),
     ) -> torch.Tensor:
         """Per-request extend attention against the paged KV cache.
 
@@ -182,7 +174,6 @@ class FlashAttentionBackend:
                 cache_seqlens=totals[i : i + 1],
                 softmax_scale=1.0 / math.sqrt(head_dim),
                 causal=True,
-                window_size=window_size,
             )
             out_flat[start:end] = out_i[0]
         return out_flat
@@ -205,17 +196,8 @@ class FlashInferBackend:
         k_cache: torch.Tensor | None = None,
         v_cache: torch.Tensor | None = None,
         attn_meta: AttentionMetadata | None = None,
-        sliding_window: int | None = None,
     ) -> torch.Tensor:
         if not _FLASHINFER_AVAILABLE:
             msg = "flashinfer not installed"
             raise RuntimeError(msg)
-        return FlashAttentionBackend.forward(
-            q,
-            k,
-            v,
-            k_cache,
-            v_cache,
-            attn_meta,
-            sliding_window,
-        )
+        return FlashAttentionBackend.forward(q, k, v, k_cache, v_cache, attn_meta)

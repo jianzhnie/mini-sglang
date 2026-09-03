@@ -68,7 +68,6 @@ def load_weights_parallel(
     state_dict: dict[str, torch.Tensor],
     tp_rank: int = 0,
     tp_size: int = 1,
-    remap_fn=None,
 ) -> int:
     """Load weights into a model, handling tensor parallelism sharding.
 
@@ -77,7 +76,6 @@ def load_weights_parallel(
         state_dict: HF weight dictionary.
         tp_rank: Tensor parallelism rank.
         tp_size: Tensor parallelism size.
-        remap_fn: Optional function to remap HF keys → model param names.
 
     Handles:
     - ColumnParallel: weight is sharded along dim 0 (output dim)
@@ -95,16 +93,11 @@ def load_weights_parallel(
     truncated: list[str] = []
     skipped: list[str] = []
     for name, param in model.named_parameters():
-        hf_name = remap_fn(name) if remap_fn else name
-        if hf_name not in state_dict:
-            # Try the original name as fallback
-            if name in state_dict:
-                hf_name = name
-            else:
-                missing.append(name)
-                continue
+        if name not in state_dict:
+            missing.append(name)
+            continue
 
-        weight = state_dict[hf_name]
+        weight = state_dict[name]
 
         # Handle ColumnParallelLinear weights (and 1-D biases, dim 0 too)
         if getattr(param, "is_column_parallel", False):
@@ -115,7 +108,7 @@ def load_weights_parallel(
         # Handle VocabParallelEmbedding
         elif getattr(param, "is_vocab_parallel", False):
             weight = shard_tensor(weight, dim=0, rank=tp_rank, world_size=tp_size)
-        # Handle shape mismatch (e.g., embed_positions truncation)
+        # Handle benign shape mismatch (e.g. a checkpoint with a longer table)
         elif param.shape != weight.shape and param.dim() >= 2:
             weight = (
                 weight[: param.shape[0]] if weight.shape[0] > param.shape[0] else weight

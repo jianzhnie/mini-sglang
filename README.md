@@ -177,7 +177,7 @@ Starts the FastAPI server and automatically tests health check / sync completion
 
 ```bash
 python examples/npu_inference.py --model-path /path/to/model --device npu
-python examples/npu_inference.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5-1.5B
+python examples/npu_inference.py --models Qwen3-0.6B Qwen3-1.7B Qwen3-4B
 ```
 
 ## Huawei Ascend NPU Support
@@ -205,7 +205,7 @@ docker run --privileged --shm-size=16g \
 python examples/npu_inference.py --model-path /path/to/Qwen3-0.6B --device npu
 
 # NPU multi-model batch test
-python examples/npu_inference.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5-1.5B Qwen3-1.7B
+python examples/npu_inference.py --models Qwen3-0.6B Qwen3-1.7B Qwen3-4B
 ```
 
 ### NPU Adaptation Notes
@@ -225,16 +225,13 @@ python examples/npu_inference.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5-1.5B Q
 
 | Model | Status | Load time | Prefill | Decode | Batch (3x) throughput |
 |-------|--------|-----------|---------|--------|-----------------------|
-| **Qwen2.5-0.5B** | PASS | 5.3s | 395.5 tok/s | 24.2 tok/s | 72.6 tok/s |
-| **Qwen2.5-1.5B** | PASS | 14.6s | 336.5 tok/s | 20.8 tok/s | 60.8 tok/s |
-| **Qwen2.5-3B** | PASS | 39.8s | 294.7 tok/s | 15.9 tok/s | 45.9 tok/s |
 | **Qwen3-0.6B** | PASS | 13.0s | 57.4 tok/s | 14.3 tok/s | 54.0 tok/s |
 | **Qwen3-1.7B** | PASS | 13.0s | 201.4 tok/s | 13.5 tok/s | 36.0 tok/s |
 | **Qwen3-4B** | PASS | 24.4s | 260.9 tok/s | 13.0 tok/s | 39.2 tok/s |
 
-> All 6/6 models passed with semantically correct outputs. Eager-mode inference is stable and reliable.
+> All 3/3 models passed with semantically correct outputs. Eager-mode inference is stable and reliable.
 >
-> Test command: `python examples/npu_inference.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5-1.5B Qwen3-1.7B Qwen2.5-3B Qwen3-4B --max-tokens 30`
+> Test command: `python examples/npu_inference.py --models Qwen3-0.6B Qwen3-1.7B Qwen3-4B --max-tokens 30`
 
 ## Supported Models
 

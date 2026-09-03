@@ -110,11 +110,10 @@ class Engine:
 
         # Clamp max_seq_len to the model's trained context window. RoPE tables
         # and the paged KV pool / req_to_token buffers are all sized off this
-        # value, and learned-position models (OPT embed_positions) hard-fail
-        # past max_position_embeddings — so an oversized --max-seq-len would
-        # only surface later as an index error mid-generation. Engine is always
-        # built before the Scheduler (which shares server_args), so clamping
-        # here propagates everywhere.
+        # value, so an oversized --max-seq-len would only surface later as an
+        # index error mid-generation. Engine is always built before the
+        # Scheduler (which shares server_args), so clamping here propagates
+        # everywhere.
         max_pos = model_args.max_position_embeddings
         if max_pos and server_args.max_seq_len > max_pos:
             logger.warning(
@@ -201,8 +200,7 @@ class Engine:
         # forwards avoid host-device syncs and stay graph-capturable.
         # RotaryEmbedding is not an nn.Module, so it never shows up in
         # modules(); reach it via the attention modules' `rotary_emb` attr.
-        # OPT has no RoPE — the loop then simply finds nothing. prebuild()
-        # is idempotent, so per-layer instances are fine.
+        # prebuild() is idempotent, so per-layer instances are fine.
         for module in self.model.modules():
             rotary = getattr(module, "rotary_emb", None)
             if isinstance(rotary, RotaryEmbedding):

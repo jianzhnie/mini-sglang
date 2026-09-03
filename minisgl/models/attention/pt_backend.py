@@ -31,7 +31,6 @@ class PyTorchBackend:
         k_cache: torch.Tensor | None = None,
         v_cache: torch.Tensor | None = None,
         attn_meta: AttentionMetadata | None = None,
-        sliding_window: int | None = None,
     ) -> torch.Tensor:
         batch, num_heads, seq_len, head_dim = q.shape
         scale = 1.0 / math.sqrt(head_dim)
@@ -50,7 +49,6 @@ class PyTorchBackend:
                 v_cache,
                 scale,
                 attn_meta,
-                sliding_window,
             )
 
         # Prefill (attn_meta=None is just a cache-less causal prefill).
@@ -75,32 +73,10 @@ class PyTorchBackend:
                 prefix_lens,
                 req_to_token,
                 scale,
-                sliding_window,
             )
 
         if cu_seqlens_q is not None and len(cu_seqlens_q) > 2:
-            return PyTorchBackend._prefill_varlen(
-                q, k, v, cu_seqlens_q, scale, sliding_window
-            )
-
-        if sliding_window is not None:
-            # Sliding window (Mistral): query i attends keys j in
-            # [i - window + 1, i] — causal plus a band condition.
-            pos = torch.arange(seq_len, device=q.device)
-            allow = (pos.unsqueeze(0) <= pos.unsqueeze(1)) & (
-                pos.unsqueeze(0) > pos.unsqueeze(1) - sliding_window
-            )
-            attn_bias = torch.zeros(seq_len, seq_len, dtype=q.dtype, device=q.device)
-            attn_bias.masked_fill_(~allow, float("-inf"))
-            return F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=attn_bias,
-                dropout_p=0.0,
-                is_causal=False,
-                scale=scale,
-            )
+            return PyTorchBackend._prefill_varlen(q, k, v, cu_seqlens_q, scale)
 
         return F.scaled_dot_product_attention(
             q,
@@ -121,14 +97,12 @@ class PyTorchBackend:
         prefix_lens: torch.Tensor,
         req_to_token: torch.Tensor,
         scale: float,
-        sliding_window: int | None = None,
     ) -> torch.Tensor:
         """Extend attention: suffix queries attend to cached prefix + suffix KV.
 
         For request i with cached prefix length c and u uncached tokens, all
         c+u KV entries are gathered via req_to_token, and the query at
         relative position p attends to keys [0, c + p] (causal with offset).
-        With a sliding window, keys older than the window are masked out too.
         """
         _, num_heads, _, head_dim = q.shape
         num_kv_heads = k_cache.shape[2]
@@ -157,8 +131,6 @@ class PyTorchBackend:
             q_pos = torch.arange(u, device=q.device) + cached
             k_pos = torch.arange(total, device=q.device)
             allow = k_pos.unsqueeze(0) <= q_pos.unsqueeze(1)
-            if sliding_window is not None:
-                allow &= k_pos.unsqueeze(0) > q_pos.unsqueeze(1) - sliding_window
             attn_bias = torch.zeros(u, total, dtype=q.dtype, device=q.device)
             attn_bias.masked_fill_(~allow, float("-inf"))
 
@@ -181,7 +153,6 @@ class PyTorchBackend:
         v: torch.Tensor,
         cu_seqlens: torch.Tensor,
         scale: float,
-        sliding_window: int | None = None,
     ) -> torch.Tensor:
         """Handle multi-sequence prefill by processing each sequence separately."""
         batch, num_heads, total_len, head_dim = q.shape
@@ -195,26 +166,13 @@ class PyTorchBackend:
             qi = q[:, :, start:end, :]
             ki = k[:, :, start:end, :]
             vi = v[:, :, start:end, :]
-            attn_mask = None
-            is_causal = True
-            if sliding_window is not None:
-                # Sliding window (Mistral): query i attends keys j in
-                # [i - window + 1, i].
-                seq_i = end - start
-                pos = torch.arange(seq_i, device=q.device)
-                allow = (pos.unsqueeze(0) <= pos.unsqueeze(1)) & (
-                    pos.unsqueeze(0) > pos.unsqueeze(1) - sliding_window
-                )
-                attn_mask = torch.zeros(seq_i, seq_i, dtype=q.dtype, device=q.device)
-                attn_mask.masked_fill_(~allow, float("-inf"))
-                is_causal = False
             out_i = F.scaled_dot_product_attention(
                 qi,
                 ki,
                 vi,
-                attn_mask=attn_mask,
+                attn_mask=None,
                 dropout_p=0.0,
-                is_causal=is_causal,
+                is_causal=True,
                 scale=scale,
             )
             outputs[:, :, start:end, :] = out_i
@@ -229,7 +187,6 @@ class PyTorchBackend:
         v_cache: torch.Tensor,
         scale: float,
         attn_meta: AttentionMetadata,
-        sliding_window: int | None = None,
     ) -> torch.Tensor:
         """Gather cached K,V from page table and run full-context attention."""
         req_to_token = attn_meta.req_to_token
@@ -254,14 +211,6 @@ class PyTorchBackend:
             max_len = int(cache_seqlens.max().item())
         idxs = req_to_token[:, :max_len]
         valid_mask = idxs >= 0
-
-        if sliding_window is not None:
-            # The current query sits at absolute position cache_seqlens-1;
-            # key j sits at absolute position j. Mask keys outside the window.
-            q_pos = (cache_seqlens.long() - 1).unsqueeze(1)  # (num_reqs, 1)
-            k_pos = torch.arange(max_len, device=q.device).unsqueeze(0)
-            valid_mask = valid_mask & (k_pos > q_pos - sliding_window)
-
         idxs_safe = idxs.clamp(min=0).long()
 
         # Gather KV-head rows first, then expand GQA groups on the small

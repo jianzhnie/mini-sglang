@@ -22,8 +22,6 @@ class BaseAttention(nn.Module):
     Subclasses must set: num_heads, num_kv_heads, head_dim, hidden_size.
     Subclasses must implement: _project_qkv(), _project_output().
     Optional hooks: _pre_rope_hook(q, k).
-    Optional attributes: sliding_window (band width for Mistral-style
-    sliding-window attention).
 
     KV cache ownership
     ------------------
@@ -50,7 +48,6 @@ class BaseAttention(nn.Module):
     num_kv_heads: int
     head_dim: int
     hidden_size: int
-    sliding_window: int | None = None
     # Per-layer slices of the paged KV cache pool, bound once by the engine
     # via set_kv_cache(); None means "no KV cache" (plain causal attention).
     k_cache: torch.Tensor | None = None
@@ -165,7 +162,6 @@ class BaseAttention(nn.Module):
             self.k_cache,
             self.v_cache,
             attn_meta,
-            self.sliding_window,
         )
         output = self._reshape_output(output, batch_size, seq_len)
         output = self._project_output(output)

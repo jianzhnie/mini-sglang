@@ -79,9 +79,6 @@ class ModelArgs:
     rope_theta: float = 10000.0
     rms_norm_eps: float = 1e-6
     tie_word_embeddings: bool = False
-    use_sliding_window: bool = False
-    sliding_window: int | None = None
-    rope_scaling: dict | None = None
     # MoE
     num_experts: int = 0
     num_experts_per_tok: int = 0
@@ -114,9 +111,6 @@ class ModelArgs:
             rope_theta=cfg.get("rope_theta", 10000.0),
             rms_norm_eps=cfg.get("rms_norm_eps", 1e-6),
             tie_word_embeddings=cfg.get("tie_word_embeddings", False),
-            use_sliding_window=cfg.get("use_sliding_window", False),
-            sliding_window=cfg.get("sliding_window", None),
-            rope_scaling=cfg.get("rope_scaling", None),
             num_experts=cfg.get("num_experts", 0),
             num_experts_per_tok=cfg.get("num_experts_per_tok", 0),
             moe_intermediate_size=cfg.get("moe_intermediate_size", 0),

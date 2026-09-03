@@ -50,7 +50,6 @@ class AttentionBackend:
         k_cache: torch.Tensor | None = None,
         v_cache: torch.Tensor | None = None,
         attn_meta: AttentionMetadata | None = None,
-        sliding_window: int | None = None,
     ) -> torch.Tensor:
         """Compute attention output. Routes to the configured backend.
 
@@ -65,19 +64,11 @@ class AttentionBackend:
         backend = cls._backend_name
 
         if backend == "pt":
-            return PyTorchBackend.forward(
-                q, k, v, k_cache, v_cache, attn_meta, sliding_window
-            )
+            return PyTorchBackend.forward(q, k, v, k_cache, v_cache, attn_meta)
 
         if "fi" in backend and _FLASHINFER_AVAILABLE:
-            return FlashInferBackend.forward(
-                q, k, v, k_cache, v_cache, attn_meta, sliding_window
-            )
+            return FlashInferBackend.forward(q, k, v, k_cache, v_cache, attn_meta)
         elif _FLASH_ATTN_AVAILABLE:
-            return FlashAttentionBackend.forward(
-                q, k, v, k_cache, v_cache, attn_meta, sliding_window
-            )
+            return FlashAttentionBackend.forward(q, k, v, k_cache, v_cache, attn_meta)
         else:
-            return PyTorchBackend.forward(
-                q, k, v, k_cache, v_cache, attn_meta, sliding_window
-            )
+            return PyTorchBackend.forward(q, k, v, k_cache, v_cache, attn_meta)

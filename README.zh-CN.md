@@ -63,7 +63,7 @@ pip install flash-attn flashinfer
 
 ```bash
 # 单 GPU (CUDA)
-python -m minisgl --model-path Qwen/Qwen2.5-0.5B --port 8000
+python -m minisgl --model-path Qwen/Qwen3-0.6B --port 8000
 
 # 华为 Ascend NPU
 python -m minisgl --model-path Qwen/Qwen3-0.6B --device npu --attention-backend pt
@@ -176,7 +176,7 @@ python examples/server_demo.py --model-path /path/to/model
 
 ```bash
 python examples/npu_inference.py --model-path /path/to/model --device npu
-python examples/npu_inference.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5-1.5B
+python examples/npu_inference.py --models Qwen3-0.6B Qwen3-1.7B Qwen3-4B
 ```
 
 ## 华为 Ascend NPU 支持
@@ -204,7 +204,7 @@ docker run --privileged --shm-size=16g \
 python examples/npu_inference.py --model-path /path/to/Qwen3-0.6B --device npu
 
 # NPU 多模型批量测试
-python examples/npu_inference.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5-1.5B Qwen3-1.7B
+python examples/npu_inference.py --models Qwen3-0.6B Qwen3-1.7B Qwen3-4B
 ```
 
 ### NPU 适配要点
@@ -224,27 +224,22 @@ python examples/npu_inference.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5-1.5B Q
 
 | 模型 | 状态 | 加载时间 | Prefill | Decode | 批量(3x)吞吐 |
 |------|------|---------|---------|--------|-------------|
-| **Qwen2.5-0.5B** | PASS | 5.3s | 395.5 tok/s | 24.2 tok/s | 72.6 tok/s |
-| **Qwen2.5-1.5B** | PASS | 14.6s | 336.5 tok/s | 20.8 tok/s | 60.8 tok/s |
-| **Qwen2.5-3B** | PASS | 39.8s | 294.7 tok/s | 15.9 tok/s | 45.9 tok/s |
 | **Qwen3-0.6B** | PASS | 13.0s | 57.4 tok/s | 14.3 tok/s | 54.0 tok/s |
 | **Qwen3-1.7B** | PASS | 13.0s | 201.4 tok/s | 13.5 tok/s | 36.0 tok/s |
 | **Qwen3-4B** | PASS | 24.4s | 260.9 tok/s | 13.0 tok/s | 39.2 tok/s |
 
-> 6/6 模型全部通过，生成结果语义正确。Eager 模式推理稳定可靠。
+> 3/3 模型全部通过，生成结果语义正确。Eager 模式推理稳定可靠。
 >
-> 测试命令：`python examples/npu_inference.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5-1.5B Qwen3-1.7B Qwen2.5-3B Qwen3-4B --max-tokens 30`
+> 测试命令：`python examples/npu_inference.py --models Qwen3-0.6B Qwen3-1.7B Qwen3-4B --max-tokens 30`
 
 ## 支持的模型
 
+Mini-SGLang 支持 **Qwen3 系列**的稠密 decoder-only 模型。
+
 | 模型 | 架构要点 | CUDA 验证 | NPU 验证 |
 |------|---------|-----------|----------|
-| **OPT** | LayerNorm + 可学习位置编码 + ReLU FFN | OPT-125M | OPT-125M |
-| **Qwen2** | RMSNorm + RoPE + Gated MLP (SwiGLU) + Q/K bias | Qwen2.5-0.5B | Qwen2.5-{0.5B, 1.5B, 3B} |
-| **Qwen3** | Qwen2 + QK LayerNorm + GQA | Qwen3-0.6B | Qwen3-{0.6B, 1.7B, 4B} |
-| **Qwen3-MoE** | Qwen3 + MoE Router（softmax → top-k → 归一，对齐 HF） | (单元测试) | (单元测试) |
-| **Llama** | 经典架构 + tie_word_embeddings | (单元测试) | (单元测试) |
-| **Mistral** | Llama + Sliding Window Attention | (单元测试) | (单元测试) |
+| **Qwen3** | RMSNorm + RoPE + SwiGLU + QK LayerNorm + GQA | Qwen3-0.6B | Qwen3-{0.6B, 1.7B, 4B} |
+| **Qwen3-MoE** | Qwen3 + 稀疏 MoE Router（softmax → top-k → 归一，对齐 HF） | (单元测试) | (单元测试) |
 
 ## 运行测试
 
