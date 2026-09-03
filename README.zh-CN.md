@@ -244,10 +244,10 @@ Mini-SGLang 支持 **Qwen3 系列**的稠密 decoder-only 模型。
 ## 运行测试
 
 ```bash
-# 单元测试（99 个测试，CPU 即可，~15s）——用 pytest 或直接运行
+# 单元测试（99 个测试，CPU 即可，~15s）——目录镜像 minisgl 包结构
 python -m pytest tests
 # 或直接运行单个文件：
-python tests/test_scheduler.py
+python tests/scheduler/test_scheduler.py
 
 # 示例冒烟测试（cpu_demo 无需模型；模型用例通过 MINISGL_TEST_MODELS 传入本地模型路径，未设置则跳过）
 python tests/test_examples.py
@@ -257,6 +257,8 @@ docker run --privileged -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
   -v $(pwd):/workspace -w /workspace torchtitan-npu:cann9.0.0-torch2.12.0 \
   python -m pytest tests
 ```
+
+测试文件镜像 `minisgl/` 的子包：`tests/models/`、`tests/engine/`、`tests/scheduler/`、`tests/server/`、`tests/utils/`。
 
 ### 测试覆盖
 

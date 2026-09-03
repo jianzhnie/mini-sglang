@@ -1,6 +1,6 @@
 """Server frontend: request lifecycle, detokenization, streaming.
 
-Run: python3 test_server.py   (or: python -m pytest tests/test_server.py)
+Run: python3 tests/server/test_server.py   (or: python -m pytest tests/server/test_server.py)
 """
 
 import sys
@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 # Make the repo root importable regardless of the invocation directory.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 

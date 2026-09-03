@@ -1,6 +1,6 @@
 """KV cache: paged pool, radix tree, naive manager unit tests.
 
-Run: python3 test_kvcache.py   (or: python -m pytest tests/test_kvcache.py)
+Run: python3 tests/engine/test_kvcache.py   (or: python -m pytest tests/engine/test_kvcache.py)
 """
 
 import sys
@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 
 # Make the repo root importable regardless of the invocation directory.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 

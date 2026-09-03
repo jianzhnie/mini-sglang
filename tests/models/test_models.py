@@ -1,6 +1,6 @@
 """Qwen3 / Qwen3-MoE model and registry unit tests.
 
-Run: python3 test_models.py   (or: python -m pytest tests/test_models.py)
+Run: python3 tests/models/test_models.py   (or: python -m pytest tests/models/test_models.py)
 """
 
 import sys
@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 
 # Make the repo root importable regardless of the invocation directory.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 

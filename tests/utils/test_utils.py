@@ -1,8 +1,9 @@
 """Config, sampling, weight loading, device/distributed helpers.
 
-Run: python3 test_utils.py   (or: python -m pytest tests/test_utils.py)
+Run: python3 tests/utils/test_utils.py   (or: python -m pytest tests/utils/test_utils.py)
 """
 
+import logging
 import sys
 import unittest
 from pathlib import Path
@@ -11,7 +12,7 @@ import torch
 import torch.nn as nn
 
 # Make the repo root importable regardless of the invocation directory.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 
@@ -326,13 +327,105 @@ class TestServerArgsDevice(unittest.TestCase):
         AttentionBackend.configure("fa")
 
 
+# ── Test Logger ──
+class TestLogger(unittest.TestCase):
+    def test_setup_logger_returns_configured_logger(self):
+        from minisgl.utils.logger import setup_logger
+
+        log = setup_logger("test_logger", level=logging.INFO)
+        self.assertEqual(log.level, logging.INFO)
+        # Handlers are replaced on each call, so exactly one stream handler.
+        self.assertEqual(len(log.handlers), 1)
+        # Stream handler writes to stdout.
+        self.assertIsInstance(log.handlers[0], logging.StreamHandler)
+
+    def test_setup_logger_log_file(self):
+        import tempfile
+        from pathlib import Path
+
+        from minisgl.utils.logger import setup_logger
+
+        with tempfile.TemporaryDirectory() as d:
+            log_file = Path(d, "test.log")
+            log = setup_logger("test_file_logger", level=logging.INFO, log_file=str(log_file))
+            self.assertEqual(len(log.handlers), 2)  # stream + file
+            log.warning("hello file")
+            for h in log.handlers:
+                h.flush()
+            self.assertIn("hello file", log_file.read_text())
+
+    def test_logger_writes_to_logging_capture(self):
+        import logging
+
+        from minisgl.utils.logger import logger
+
+        with self.assertLogs("minisgl", level="WARNING") as cm:
+            logger.warning("a warning message")
+        self.assertTrue(any("a warning message" in m for m in cm.output))
+
+
+# ── Test CLI Argument Parsing ──
+class TestCLIArgs(unittest.TestCase):
+    def test_parse_args_defaults(self):
+        from minisgl.cli import parse_args
+
+        # parse_args reads sys.argv; feed it a minimal valid invocation.
+        old_argv = sys.argv
+        sys.argv = ["minisgl", "--model-path", "/tmp/model"]
+        try:
+            args = parse_args()
+        finally:
+            sys.argv = old_argv
+        self.assertEqual(args.model_path, "/tmp/model")
+        self.assertEqual(args.tp_size, 1)
+        self.assertEqual(args.port, 8000)
+        self.assertEqual(args.attention_backend, "fa")
+        self.assertFalse(args.shell)
+
+    def test_parse_args_custom_values(self):
+        from minisgl.cli import parse_args
+
+        old_argv = sys.argv
+        sys.argv = [
+            "minisgl", "--model-path", "/m/model", "--tp-size", "1",
+            "--port", "9000", "--device", "cpu", "--dtype", "float32",
+            "--attention-backend", "pt", "--max-seq-len", "4096",
+            "--page-size", "8", "--shell",
+        ]
+        try:
+            args = parse_args()
+        finally:
+            sys.argv = old_argv
+        self.assertEqual(args.port, 9000)
+        self.assertEqual(args.device, "cpu")
+        self.assertEqual(args.dtype, "float32")
+        self.assertEqual(args.attention_backend, "pt")
+        self.assertEqual(args.max_seq_len, 4096)
+        self.assertEqual(args.page_size, 8)
+        self.assertTrue(args.shell)
+
+    def test_parse_args_rejects_tp_size_gt_1(self):
+        from minisgl.cli import parse_args
+
+        old_argv = sys.argv
+        sys.argv = ["minisgl", "--model-path", "/m/model", "--tp-size", "2"]
+        try:
+            with self.assertRaises(SystemExit):
+                parse_args()
+        finally:
+            sys.argv = old_argv
+
+    def test_parse_args_rejects_invalid_backend(self):
+        from minisgl.cli import parse_args
+
+        old_argv = sys.argv
+        sys.argv = ["minisgl", "--model-path", "/m/model", "--attention-backend", "fi"]
+        try:
+            with self.assertRaises(SystemExit):
+                parse_args()
+        finally:
+            sys.argv = old_argv
+
+
 if __name__ == "__main__":
-    print("=" * 60)
-    print("Mini-SGLang CPU Core Test Suite")
-    print("=" * 60)
-    unittest.main(verbosity=2)
-
-
-
-if __name__ == '__main__':
     unittest.main(verbosity=2)

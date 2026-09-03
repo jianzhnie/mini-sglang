@@ -1,6 +1,6 @@
 """Scheduler: batching, prefill/decode managers, end-to-end lifecycle.
 
-Run: python3 test_scheduler.py   (or: python -m pytest tests/test_scheduler.py)
+Run: python3 tests/scheduler/test_scheduler.py   (or: python -m pytest tests/scheduler/test_scheduler.py)
 """
 
 import sys
@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 
 # Make the repo root importable regardless of the invocation directory.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 
@@ -733,8 +733,56 @@ class TestRadixEvictionE2E(unittest.TestCase):
         self.assertNotIn(prompt_a[8], node.children)
 
 
-# ── Test Device Utilities (NPU-aware) ──
+# ── Test GraphRunner (CPU-safe paths) ──
+class TestGraphRunner(unittest.TestCase):
+    """Graph capture needs CUDA/NPU, but the eager-fallback + cleanup logic is CPU-testable."""
 
+    def test_engine_creates_no_graph_runner_on_cpu(self):
+        scheduler = TestEndToEndScheduler._make_engine_scheduler(cuda_graph_bs=8)
+        # The engine gates graph capture to cuda/npu, so CPU stays eager.
+        self.assertIsNone(scheduler.engine.graph_runner)
+
+    def test_replay_empty_returns_none(self):
+        """With no captured graphs, replay() falls back to eager (returns None)."""
+        from minisgl.engine.graph import GraphRunner
+
+        runner = object.__new__(GraphRunner)
+        runner.graphs = {}
+        runner.inputs = {}
+        runner.outputs = {}
+        # Batch with any request count: no graph large enough exists.
+        from minisgl.scheduler.batch import Batch, Req
+
+        batch = Batch(reqs=[Req()], phase="decode")
+        self.assertIsNone(runner.replay(batch))
+
+    def test_replay_no_fit_returns_none(self):
+        """If every captured graph is smaller than the batch, fall back to eager."""
+        from minisgl.engine.graph import GraphRunner
+
+        runner = object.__new__(GraphRunner)
+        runner.graphs = {1: object(), 2: object()}
+        runner.inputs = {1: {}, 2: {}}
+        runner.outputs = {1: None, 2: None}
+        from minisgl.scheduler.batch import Batch, Req
+
+        batch = Batch(reqs=[Req() for _ in range(4)], phase="decode")
+        self.assertIsNone(runner.replay(batch))
+
+    def test_clear_drops_state(self):
+        from minisgl.engine.graph import GraphRunner
+
+        runner = object.__new__(GraphRunner)
+        runner.graphs = {1: object()}
+        runner.inputs = {1: {"k": 1}}
+        runner.outputs = {1: object()}
+        runner.clear()
+        self.assertEqual(runner.graphs, {})
+        self.assertEqual(runner.inputs, {})
+        self.assertEqual(runner.outputs, {})
+
+
+# ── Test Device Utilities (NPU-aware) ──
 
 
 if __name__ == '__main__':

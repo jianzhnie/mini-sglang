@@ -1,6 +1,6 @@
 """Model layer & attention-backend unit tests.
 
-Run: python3 test_layers.py   (or: python -m pytest tests/test_layers.py)
+Run: python3 tests/models/test_layers.py   (or: python -m pytest tests/models/test_layers.py)
 """
 
 import sys
@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 
 # Make the repo root importable regardless of the invocation directory.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 
@@ -306,8 +306,105 @@ class TestPyTorchBackendDecode(unittest.TestCase):
         self.assertTrue(torch.allclose(out, ref, atol=1e-5))
 
 
-# ── Test EOS Normalization ──
+# ── Test BaseAttention helpers ──
+class TestBaseAttentionHelpers(unittest.TestCase):
+    """Exercises the shared BaseAttention machinery used by Qwen3/Qwen3-MoE."""
 
+    def _make_attn(self):
+        from minisgl.config import ModelArgs
+        from minisgl.models.qwen3 import Qwen3Attention
+
+        config = ModelArgs(
+            hidden_size=128,
+            num_layers=1,
+            num_attention_heads=4,
+            num_kv_heads=2,
+            intermediate_size=512,
+            vocab_size=1000,
+            max_position_embeddings=128,
+            head_dim=32,
+            qk_norm=True,
+        )
+        return Qwen3Attention(config)
+
+    def test_reshape_for_attention(self):
+        attn = self._make_attn()
+        batch, seq, hidden = 2, 6, 128
+        x = torch.randn(batch, seq, hidden)
+        q = torch.randn(batch, seq, attn.num_local_heads * attn.head_dim)
+        k = torch.randn(batch, seq, attn.num_local_kv_heads * attn.head_dim)
+        v = torch.randn(batch, seq, attn.num_local_kv_heads * attn.head_dim)
+        qr, kr, vr = attn._reshape_for_attention(q, k, v, batch, seq)
+        self.assertEqual(qr.shape, (batch, attn.num_local_heads, seq, attn.head_dim))
+        self.assertEqual(kr.shape, (batch, attn.num_local_kv_heads, seq, attn.head_dim))
+        self.assertEqual(vr.shape, (batch, attn.num_local_kv_heads, seq, attn.head_dim))
+
+    def test_reshape_output_roundtrip(self):
+        attn = self._make_attn()
+        batch, seq = 1, 8
+        # forward-shaped output: (batch, heads, seq, head_dim) -> (batch, seq, hidden)
+        out = torch.randn(batch, attn.num_local_heads, seq, attn.head_dim)
+        reshaped = attn._reshape_output(out, batch, seq)
+        self.assertEqual(reshaped.shape, (batch, seq, attn.num_local_heads * attn.head_dim))
+        # contiguous and independent of the input strides
+        self.assertTrue(reshaped.is_contiguous())
+
+    def test_pre_rope_hook_applies_qk_norm(self):
+        attn = self._make_attn()
+        q = torch.randn(1, attn.num_local_heads, 4, attn.head_dim)
+        k = torch.randn(1, attn.num_local_kv_heads, 4, attn.head_dim)
+        q_before = q.clone()
+        k_before = k.clone()
+        qn, kn = attn._pre_rope_hook(q, k)
+        # QK-norm normalizes along the head dim, so values must change and
+        # per-head RMS should be ~1.
+        self.assertFalse(torch.allclose(qn, q_before, atol=1e-6))
+        self.assertFalse(torch.allclose(kn, k_before, atol=1e-6))
+        self.assertTrue(
+            torch.allclose(
+                qn.pow(2).mean(-1, keepdim=True).sqrt(), torch.ones_like(qn.pow(2).mean(-1, keepdim=True).sqrt()), atol=1e-3
+            )
+        )
+
+    def test_write_kv_cache_scatter(self):
+        """_write_kv_cache scatters K/V into the paged cache at write_loc."""
+        attn = self._make_attn()
+        num_kv_heads, head_dim = 2, 32
+        num_pages, page_size = 2, 8
+        k_cache = torch.zeros(num_pages, page_size, num_kv_heads, head_dim)
+        v_cache = torch.zeros(num_pages, page_size, num_kv_heads, head_dim)
+        attn.set_kv_cache(k_cache, v_cache)
+
+        k = torch.randn(1, num_kv_heads, 3, head_dim)
+        v = torch.randn(1, num_kv_heads, 3, head_dim)
+        write_loc = torch.tensor([0, 8, -1], dtype=torch.int32)  # slots 0, page1-slot0; -1 skipped
+        attn._write_kv_cache(k, v, write_loc)
+
+        flat_k = k_cache.view(-1, num_kv_heads, head_dim)
+        flat_v = v_cache.view(-1, num_kv_heads, head_dim)
+        self.assertTrue(torch.equal(flat_k[0], k[0, :, 0, :]))
+        self.assertTrue(torch.equal(flat_v[0], v[0, :, 0, :]))
+        self.assertTrue(torch.equal(flat_k[8], k[0, :, 1, :]))
+        self.assertTrue(torch.equal(flat_v[8], v[0, :, 1, :]))
+        # The -1 slot must not be written (remains zero).
+        self.assertTrue(torch.all(flat_k[5] == 0))
+        self.assertTrue(torch.all(flat_v[5] == 0))
+
+    def test_set_kv_cache_binds_slices(self):
+        attn = self._make_attn()
+        kc = torch.zeros(1, 1, attn.num_local_kv_heads, attn.head_dim)
+        vc = torch.zeros(1, 1, attn.num_local_kv_heads, attn.head_dim)
+        attn.set_kv_cache(kc, vc)
+        self.assertIs(attn.k_cache, kc)
+        self.assertIs(attn.v_cache, vc)
+        # BaseAttention without a bound cache skips writes silently.
+        attn.k_cache = None
+        attn.v_cache = None
+        k = torch.randn(1, attn.num_local_kv_heads, 1, attn.head_dim)
+        v = torch.randn(1, attn.num_local_kv_heads, 1, attn.head_dim)
+        attn._write_kv_cache(
+            k, v, torch.tensor([0], dtype=torch.int32)
+        )  # must not raise
 
 
 if __name__ == '__main__':
