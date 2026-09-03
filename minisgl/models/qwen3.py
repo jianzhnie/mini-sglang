@@ -1,6 +1,6 @@
 """Qwen3 model implementation.
 
-Differences from Qwen2:
+Qwen3 attention features:
 - QK LayerNorm: separate RMSNorm for Q and K before RoPE
 - GQA support (num_kv_heads != num_heads)
 """

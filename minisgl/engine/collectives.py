@@ -1,11 +1,11 @@
 """Collective communication primitives with NCCL/HCCL dual backends.
 
 Uses torch.distributed as the backend for collective operations
-(all_reduce, all_gather, broadcast) used in tensor parallelism, covering
-both NCCL (GPU) and HCCL (NPU) backends.
+(all_reduce, all_gather) used in tensor parallelism, covering both NCCL
+(GPU) and HCCL (NPU) backends.
 """
 
-__all__ = ["all_gather", "all_reduce", "barrier", "broadcast"]
+__all__ = ["all_gather", "all_reduce"]
 import torch
 import torch.distributed as dist
 
@@ -30,17 +30,3 @@ def all_gather(tensor: torch.Tensor, dim: int = -1) -> torch.Tensor:
     chunks = [torch.empty_like(tensor) for _ in range(tp_size)]
     dist.all_gather(chunks, tensor)
     return torch.cat(chunks, dim=dim)
-
-
-def broadcast(tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
-    """Broadcast tensor from src rank to all ranks."""
-    if not is_distributed():
-        return tensor
-    dist.broadcast(tensor, src=src)
-    return tensor
-
-
-def barrier() -> None:
-    """Synchronize all TP ranks."""
-    if is_distributed():
-        dist.barrier()

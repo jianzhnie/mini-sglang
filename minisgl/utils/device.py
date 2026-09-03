@@ -5,7 +5,6 @@ Device priority: NPU > CUDA > CPU (configurable via set_device).
 """
 
 __all__ = [
-    "barrier",
     "DeviceState",
     "get_device",
     "get_device_type",
@@ -163,8 +162,3 @@ def init_distributed(
 
 def is_distributed() -> bool:
     return _state.tp_size > 1 and dist.is_initialized()
-
-
-def barrier() -> None:
-    if is_distributed():
-        dist.barrier()

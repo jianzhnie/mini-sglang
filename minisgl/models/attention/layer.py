@@ -1,8 +1,8 @@
 """Base attention module with shared KV cache write and forward logic.
 
-All model-specific attention classes (Qwen2, Qwen3, Llama, Mistral, OPT)
-inherit from this base and only override projection creation and optional
-pre/post-processing hooks.
+All model-specific attention classes (Qwen3 and Qwen3-MoE) inherit from this
+base and only override projection creation and optional pre/post-processing
+hooks.
 """
 
 from __future__ import annotations

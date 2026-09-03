@@ -1,7 +1,7 @@
 """Shared decoder-only transformer base classes.
 
-Eliminates duplication across Qwen2, Qwen3, Llama, and Mistral models.
-All share the same RMSNorm + SwiGLU decoder architecture.
+Eliminates duplication across the Qwen3 family (dense + MoE). All share the
+same RMSNorm + SwiGLU decoder architecture.
 """
 
 __all__ = [

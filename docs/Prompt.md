@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-**Mini-SGLang** 是 [SGLang](https://github.com/sgl-project/sglang) 的轻量级教学实现，目标是用 ~5,200 行 Python 完整复刻一个高性能 LLM 推理框架。它拆解了现代 LLM 服务系统的每一个关键环节，让开发者能够逐行理解推理引擎的内部工作原理。
+**Mini-SGLang** 是 [SGLang](https://github.com/sgl-project/sglang) 的轻量级教学实现，目标是用 ~4,800 行 Python 完整复刻一个高性能 LLM 推理框架。它拆解了现代 LLM 服务系统的每一个关键环节，让开发者能够逐行理解推理引擎的内部工作原理。
 
 **解决的核心问题：**
 - 如何在 GPU 上高效运行大语言模型推理（Prefill/Decode 分离、CUDA Graph 加速）
@@ -156,7 +156,7 @@ class SamplingParams:
 
 ### Attention 后端（可插拔）
 - **FlashAttention** (`fa`): 通用后端，兼容性好
-- **PyTorch SDPA** (`pt`): 纯 PyTorch 参考实现（CPU/NPU 也用它），支持 sliding window 与 extend attention
+- **PyTorch SDPA** (`pt`): 纯 PyTorch 参考实现（CPU/NPU 也用它），支持 extend attention
 - **FlashInfer** (`fi`): 尚未实现——选择后转调 `fa`；`fa,fi`（hybrid）目前同样全部走 `fa`
 
 ### KV Cache 管理
@@ -187,11 +187,8 @@ class SamplingParams:
 ## 支持的模型
 
 ### 基础要求
-- **Qwen2** — Qwen2ForCausalLM（推荐首选实现）
 - **Qwen3** — Qwen3ForCausalLM（支持 GQA + QK Norm）
 - **Qwen3-MoE** — Qwen3MoEForCausalLM（含 MoE Router + 融合 expert 权重）
-- **Llama** — LlamaForCausalLM（最经典的架构参考）
-- **Mistral** — MistralForCausalLM（含 Sliding Window Attention）
 
 ### 模型架构需支持的组件
 | 组件 | 说明 |
@@ -233,10 +230,10 @@ class SamplingParams:
 ### 启动方式
 ```bash
 # 启动服务（TP=1）
-python -m minisgl --model-path Qwen/Qwen2-0.5B-Instruct --port 8000
+python -m minisgl --model-path Qwen/Qwen3-0.6B --port 8000
 
 # 交互式 CLI shell
-python -m minisgl --model-path Qwen/Qwen2-0.5B-Instruct --shell
+python -m minisgl --model-path Qwen/Qwen3-0.6B --shell
 ```
 
 > 注：`--tp-size > 1` 暂不支持（多进程 TP 启动未实现），传入会直接报错退出。
