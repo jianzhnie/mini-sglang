@@ -134,6 +134,7 @@ curl http://127.0.0.1:8000/health
 
 ```
 examples/
+├── _common.py           # 共享工具：模型发现、引擎搭建、生成循环
 ├── cpu_demo.py          # 零依赖 CPU 自包含 demo（无需下载模型）
 ├── offline_inference.py # 综合离线推理：批量生成、LLM API、流式、采样策略
 ├── benchmark.py         # 性能基准：prefill 延迟、decode 吞吐、端到端

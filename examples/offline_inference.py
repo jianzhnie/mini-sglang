@@ -16,59 +16,28 @@ import argparse
 import os
 import sys
 import time
-from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# examples/ for _common, repo root for minisgl (see examples/_common.py).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # examples/
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # root
 
-MODELS_ROOT = "/home/jianzhnie/llmtuner/hfhub/models"
-
-
-def _find_model(*names: str) -> str:
-    env_root = os.environ.get("MINISGL_MODELS", "")
-    roots = [
-        r for r in [env_root, MODELS_ROOT, str(Path.home() / "hfhub" / "models")] if r
-    ]
-    for name in names:
-        for root in roots:
-            p = Path(root) / name
-            if p.is_dir() and (p / "config.json").exists():
-                return str(p)
-    return ""
+from _common import (  # noqa: E402
+    DEFAULT_MODEL_NAMES,
+    banner,
+    build_engine,
+    drive,
+    load_tokenizer,
+    resolve_model_path,
+    section,
+)
 
 
-def _validate(path: str) -> None:
-    if not path or not (Path(path) / "config.json").exists():
-        print(f"ERROR: Model not found at: {path!r}")
-        print(f"  python {sys.argv[0]} --model-path /path/to/hf_model")
-        sys.exit(1)
-
-
-def demo_engine_scheduler(model_path: str, max_tokens: int):
+def demo_engine_scheduler(engine, server_args, tokenizer, max_tokens):
     """Part 1: Direct Engine + Scheduler usage with batch generation."""
-    from transformers import AutoTokenizer
-
-    from minisgl.config import ModelArgs, SamplingParams, ServerArgs
-    from minisgl.engine.engine import Engine
+    from minisgl.config import SamplingParams
     from minisgl.scheduler.scheduler import Scheduler
 
-    print("\n" + "=" * 60)
-    print("  Part 1: Engine + Scheduler (Batch Generation)")
-    print("=" * 60)
-
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    server_args = ServerArgs(
-        model_path=model_path,
-        tp_size=1,
-        attention_backend="fa",
-        max_running_req=8,
-        max_seq_len=256,
-        page_size=16,
-        memory_ratio=0.5,
-        cuda_graph_bs=0,
-    )
-    model_args = ModelArgs.from_pretrained(model_path)
-    engine = Engine(server_args, model_args, tp_rank=0)
-    scheduler = Scheduler(server_args, engine)
+    section("Part 1: Engine + Scheduler (Batch Generation)")
 
     prompts = [
         "The capital of France is",
@@ -77,15 +46,15 @@ def demo_engine_scheduler(model_path: str, max_tokens: int):
     ]
     uid_map = {}
     sampling = SamplingParams(temperature=0.0, max_tokens=max_tokens)
+    scheduler = Scheduler(server_args, engine)
     for prompt in prompts:
         input_ids = tokenizer.encode(prompt)
         uid = scheduler.add_request(input_ids, sampling)
         uid_map[uid] = {"prompt": prompt, "tokens": []}
 
     t0 = time.perf_counter()
-    while not scheduler.is_idle():
-        for out in scheduler.step():
-            uid_map[out.uid]["tokens"].append(out.token_id)
+    for out in drive(scheduler):
+        uid_map[out.uid]["tokens"].append(out.token_id)
     elapsed = time.perf_counter() - t0
 
     total_tokens = sum(len(v["tokens"]) for v in uid_map.values())
@@ -99,16 +68,13 @@ def demo_engine_scheduler(model_path: str, max_tokens: int):
         f"\n  [{len(prompts)} prompts, {total_tokens} tokens, "
         f"{total_tokens / elapsed:.1f} tok/s, {elapsed:.2f}s]"
     )
-    return engine, server_args, tokenizer
 
 
-def demo_llm_api(model_path: str, max_tokens: int):
+def demo_llm_api(model_path, max_tokens):
     """Part 2: High-level LLM API (generate + chat)."""
     from minisgl.engine.llm import LLM
 
-    print("\n" + "=" * 60)
-    print("  Part 2: LLM API (generate + chat)")
-    print("=" * 60)
+    section("Part 2: LLM API (generate + chat)")
 
     llm = LLM(
         model_path=model_path,
@@ -118,15 +84,10 @@ def demo_llm_api(model_path: str, max_tokens: int):
         memory_ratio=0.5,
     )
 
+    prompts = ["The meaning of life is", "Machine learning is"]
     print("\n  ── Text Completion ──")
-    outputs = llm.generate(
-        ["The meaning of life is", "Machine learning is"],
-        temperature=0.0,
-        max_tokens=max_tokens,
-    )
-    for prompt, output in zip(
-        ["The meaning of life is", "Machine learning is"], outputs, strict=True
-    ):
+    outputs = llm.generate(prompts, temperature=0.0, max_tokens=max_tokens)
+    for prompt, output in zip(prompts, outputs, strict=True):
         print(f"  {prompt!r} → {output!r}")
 
     print("\n  ── Chat ──")
@@ -152,14 +113,12 @@ def demo_llm_api(model_path: str, max_tokens: int):
     llm.cleanup()
 
 
-def demo_streaming(engine, server_args, tokenizer, max_tokens: int):
+def demo_streaming(engine, server_args, tokenizer, max_tokens):
     """Part 3: Streaming generation with TTFT and throughput metrics."""
     from minisgl.config import SamplingParams
     from minisgl.scheduler.scheduler import Scheduler
 
-    print("\n" + "=" * 60)
-    print("  Part 3: Streaming Generation")
-    print("=" * 60)
+    section("Part 3: Streaming Generation")
 
     prompt = "Once upon a time in a land far away,"
     input_ids = tokenizer.encode(prompt)
@@ -174,17 +133,16 @@ def demo_streaming(engine, server_args, tokenizer, max_tokens: int):
     tokens = []
     start = time.perf_counter()
     first_token_time = None
-    while not scheduler.is_idle():
-        for out in scheduler.step():
-            if out.uid == uid:
-                if first_token_time is None:
-                    first_token_time = time.perf_counter() - start
-                tokens.append(out.token_id)
-                print(
-                    tokenizer.decode([out.token_id], skip_special_tokens=True),
-                    end="",
-                    flush=True,
-                )
+    for out in drive(scheduler):
+        if out.uid == uid:
+            if first_token_time is None:
+                first_token_time = time.perf_counter() - start
+            tokens.append(out.token_id)
+            print(
+                tokenizer.decode([out.token_id], skip_special_tokens=True),
+                end="",
+                flush=True,
+            )
     total_time = time.perf_counter() - start
     print()
 
@@ -193,14 +151,12 @@ def demo_streaming(engine, server_args, tokenizer, max_tokens: int):
     print(f"  [{len(tokens)} tokens, TTFT={ttft_ms:.0f}ms, {tps:.1f} tok/s]")
 
 
-def demo_sampling(engine, server_args, tokenizer, max_tokens: int):
+def demo_sampling(engine, server_args, tokenizer, max_tokens):
     """Part 4: Compare sampling strategies."""
     from minisgl.config import SamplingParams
     from minisgl.scheduler.scheduler import Scheduler
 
-    print("\n" + "=" * 60)
-    print("  Part 4: Sampling Strategies")
-    print("=" * 60)
+    section("Part 4: Sampling Strategies")
 
     prompt = "The secret to happiness is"
     input_ids = tokenizer.encode(prompt)
@@ -222,10 +178,7 @@ def demo_sampling(engine, server_args, tokenizer, max_tokens: int):
     for label, sampling in strategies:
         scheduler = Scheduler(server_args, engine)
         scheduler.add_request(list(input_ids), sampling)
-        tokens = []
-        while not scheduler.is_idle():
-            for out in scheduler.step():
-                tokens.append(out.token_id)
+        tokens = [out.token_id for out in drive(scheduler)]
         output = tokenizer.decode(tokens, skip_special_tokens=True)
         print(f"  [{label:>22}] {output!r}")
 
@@ -236,20 +189,23 @@ def main(model_path: str):
     on_cpu = not torch.cuda.is_available()
     max_tokens = 15 if on_cpu else 40
 
-    print("=" * 60)
-    print("  Mini-SGLang Offline Inference Demo")
-    print(f"  Model: {model_path}")
-    print(f"  Device: {'CPU' if on_cpu else 'CUDA'}  max_tokens={max_tokens}")
-    print("=" * 60)
+    banner(
+        "Mini-SGLang Offline Inference Demo",
+        lines=[
+            f"Model: {model_path}",
+            f"Device: {'CPU' if on_cpu else 'CUDA'}  max_tokens={max_tokens}",
+        ],
+    )
 
-    engine, server_args, tokenizer = demo_engine_scheduler(model_path, max_tokens)
+    server_args, engine = build_engine(model_path)
+    tokenizer = load_tokenizer(model_path, trust_remote_code=True)
+
+    demo_engine_scheduler(engine, server_args, tokenizer, max_tokens)
     demo_streaming(engine, server_args, tokenizer, max_tokens)
     demo_sampling(engine, server_args, tokenizer, max_tokens)
     demo_llm_api(model_path, max_tokens)
 
-    print("\n" + "=" * 60)
-    print("  ALL DEMOS COMPLETE")
-    print("=" * 60)
+    banner("ALL DEMOS COMPLETE")
 
 
 if __name__ == "__main__":
@@ -257,8 +213,5 @@ if __name__ == "__main__":
     parser.add_argument("--model-path", type=str, default=None)
     args = parser.parse_args()
 
-    model_path = args.model_path or _find_model(
-        "facebook/opt-125m", "Qwen/Qwen2.5-0.5B", "Qwen/Qwen3-0.6B"
-    )
-    _validate(model_path)
+    model_path = resolve_model_path(args.model_path, *DEFAULT_MODEL_NAMES)
     main(model_path)

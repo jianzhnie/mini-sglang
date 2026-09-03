@@ -6,6 +6,10 @@ Benchmarks:
   2. Decode throughput (tokens/second) at various batch sizes
   3. End-to-end generation throughput
 
+Each scenario is warmed up first so cold-start (page-table setup, allocator
+warm-up right after weight load) does not skew the numbers, and only real
+generated tokens count (aborted requests carry no token).
+
 Usage:
     python examples/benchmark.py
     python examples/benchmark.py --model-path /path/to/model
@@ -15,40 +19,24 @@ import argparse
 import os
 import sys
 import time
-from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# examples/ for _common, repo root for minisgl (see examples/_common.py).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # examples/
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # root
 
-def _find_model(*names: str) -> str:
-    """Locate a model by name under common local roots (env var first)."""
-    env_root = os.environ.get("MINISGL_MODELS", "")
-    roots = [
-        r
-        for r in [
-            env_root,
-            str(Path.home() / ".cache" / "huggingface" / "hub"),
-            str(Path.home() / "hfhub" / "models"),
-        ]
-        if r
-    ]
-    for name in names:
-        for root in roots:
-            # name may be a plain "org/model" (HF hub cache layout) or an
-            # absolute path already.
-            candidates = [Path(name), Path(root) / name]
-            if "/" in name:
-                candidates.append(Path(root) / f"models--{name.replace('/', '--')}")
-            for p in candidates:
-                if p.is_dir() and (p / "config.json").exists():
-                    return str(p)
-    return ""
+from _common import (  # noqa: E402
+    DEFAULT_MODEL_NAMES,
+    banner,
+    build_engine,
+    drive,
+    load_tokenizer,
+    resolve_model_path,
+)
 
 
-def _validate(path: str) -> None:
-    if not path or not (Path(path) / "config.json").exists():
-        print(f"ERROR: Model not found at: {path!r}")
-        print(f"  python {sys.argv[0]} --model-path /path/to/hf_model")
-        sys.exit(1)
+def _scheduler_tokens(scheduler) -> int:
+    """Run to idle and count generated tokens, excluding aborted requests."""
+    return sum(1 for out in drive(scheduler) if out.finish_reason != "abort")
 
 
 def benchmark_prefill(engine, scheduler_cls, server_args, tokenizer, input_lengths):
@@ -63,12 +51,11 @@ def benchmark_prefill(engine, scheduler_cls, server_args, tokenizer, input_lengt
         input_ids = list(range(1, input_len + 1))
         sampling = SamplingParams(temperature=0.0, max_tokens=1)
 
-        # Warmup: the first scheduler/forward after weight load pays cold-start
-        # (page-table setup, allocator warm-up). Drop it from the measurement.
+        # Warmup: drop the cold run before measuring.
         warmup = scheduler_cls(server_args, engine)
         warmup.add_request(list(input_ids), sampling)
-        while not warmup.is_idle():
-            warmup.step()
+        for _ in drive(warmup):
+            pass
 
         # Repeat to damp scheduler-noise; report the best (fastest) run, which
         # best reflects steady-state prefill throughput.
@@ -77,10 +64,9 @@ def benchmark_prefill(engine, scheduler_cls, server_args, tokenizer, input_lengt
             scheduler = scheduler_cls(server_args, engine)
             scheduler.add_request(list(input_ids), sampling)
             start = time.perf_counter()
-            while not scheduler.is_idle():
-                scheduler.step()
-            elapsed = time.perf_counter() - start
-            best = min(best, elapsed)
+            for _ in drive(scheduler):
+                pass
+            best = min(best, time.perf_counter() - start)
 
         ttft_ms = best * 1000
         prefill_tps = input_len / best
@@ -109,19 +95,15 @@ def benchmark_decode_throughput(
         warmup = scheduler_cls(server_args, engine)
         for _ in range(batch_size):
             warmup.add_request(list(input_ids), sampling)
-        while not warmup.is_idle():
-            warmup.step()
+        for _ in drive(warmup):
+            pass
 
         scheduler = scheduler_cls(server_args, engine)
         for _ in range(batch_size):
             scheduler.add_request(list(input_ids), sampling)
 
-        total_generated = 0
         start = time.perf_counter()
-        while not scheduler.is_idle():
-            results = scheduler.step()
-            # Count real generated tokens only (aborted requests carry no token).
-            total_generated += sum(1 for r in results if r.finish_reason != "abort")
+        total_generated = _scheduler_tokens(scheduler)
         elapsed = time.perf_counter() - start
 
         total_tps = total_generated / elapsed if elapsed > 0 else 0
@@ -149,11 +131,8 @@ def benchmark_e2e(engine, scheduler_cls, server_args, tokenizer):
         scheduler = scheduler_cls(server_args, engine)
         for prompt in prompts:
             scheduler.add_request(tokenizer.encode(prompt), sampling)
-        total_generated = 0
         start = time.perf_counter()
-        while not scheduler.is_idle():
-            results = scheduler.step()
-            total_generated += sum(1 for r in results if r.finish_reason != "abort")
+        total_generated = _scheduler_tokens(scheduler)
         return total_generated, time.perf_counter() - start
 
     print("\n── End-to-End Generation ──")
@@ -173,33 +152,18 @@ def benchmark_e2e(engine, scheduler_cls, server_args, tokenizer):
 
 def main(model_path: str) -> None:
     import torch
-    from transformers import AutoTokenizer
 
-    from minisgl.config import ModelArgs, ServerArgs
-    from minisgl.engine.engine import Engine
     from minisgl.scheduler.scheduler import Scheduler
 
     on_cpu = not torch.cuda.is_available()
 
-    print("=" * 60)
-    print("  Mini-SGLang Performance Benchmark")
-    print(f"  Model: {model_path}")
-    print(f"  Device: {'CPU' if on_cpu else 'CUDA'}")
-    print("=" * 60)
-
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    server_args = ServerArgs(
-        model_path=model_path,
-        tp_size=1,
-        attention_backend="fa",
-        max_running_req=16,
-        max_seq_len=256,
-        page_size=16,
-        memory_ratio=0.5,
-        cuda_graph_bs=0,
+    banner(
+        "Mini-SGLang Performance Benchmark",
+        lines=[f"Model: {model_path}", f"Device: {'CPU' if on_cpu else 'CUDA'}"],
     )
-    model_args = ModelArgs.from_pretrained(model_path)
-    engine = Engine(server_args, model_args, tp_rank=0)
+
+    server_args, engine = build_engine(model_path, max_running_req=16)
+    tokenizer = load_tokenizer(model_path)
 
     input_lengths = [8, 16, 32, 64, 128] if not on_cpu else [8, 16, 32]
     batch_sizes = [1, 2, 4, 8] if not on_cpu else [1, 2, 4]
@@ -208,9 +172,7 @@ def main(model_path: str) -> None:
     benchmark_decode_throughput(engine, Scheduler, server_args, tokenizer, batch_sizes)
     benchmark_e2e(engine, Scheduler, server_args, tokenizer)
 
-    print(f"\n{'=' * 60}")
-    print("  BENCHMARK COMPLETE")
-    print("=" * 60)
+    banner("BENCHMARK COMPLETE")
 
 
 if __name__ == "__main__":
@@ -218,8 +180,5 @@ if __name__ == "__main__":
     parser.add_argument("--model-path", type=str, default=None)
     args = parser.parse_args()
 
-    model_path = args.model_path or _find_model(
-        "facebook/opt-125m", "Qwen/Qwen2.5-0.5B", "Qwen/Qwen3-0.6B"
-    )
-    _validate(model_path)
+    model_path = resolve_model_path(args.model_path, *DEFAULT_MODEL_NAMES)
     main(model_path)

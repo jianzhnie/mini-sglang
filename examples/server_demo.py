@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Mini-SGLang OpenAI-compatible API server demo.
 
+Starts the real FastAPI server and exercises it end-to-end: health check,
+sync completions, SSE streaming, chat completions.
+
 Usage:
-    python server_demo.py
-    python server_demo.py --model-path /path/to/model
+    python examples/server_demo.py
+    python examples/server_demo.py --model-path /path/to/model
 
 Then test:
     curl http://127.0.0.1:8765/health
@@ -18,37 +21,24 @@ import os
 import sys
 import time
 import urllib.request
-from pathlib import Path
 
 # The server runs in a spawned subprocess that re-imports this script, so the
-# repo root (not the examples/ dir) must be on sys.path for `import minisgl`.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+# sys.path bootstrap below must run at module top level (before any import of
+# _common or minisgl) — examples/ for _common, repo root for minisgl.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # examples/
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # root
 
-MODELS_ROOT = "/home/jianzhnie/llmtuner/hfhub/models"
+from _common import (  # noqa: E402
+    DEFAULT_MODEL_NAMES,
+    banner,
+    build_engine,
+    resolve_model_path,
+)
+
 HOST, PORT = "127.0.0.1", 8765
 
 
-def _find_model(*names: str) -> str:
-    env_root = os.environ.get("MINISGL_MODELS", "")
-    roots = [
-        r for r in [env_root, MODELS_ROOT, str(Path.home() / "hfhub" / "models")] if r
-    ]
-    for name in names:
-        for root in roots:
-            p = Path(root) / name
-            if p.is_dir() and (p / "config.json").exists():
-                return str(p)
-    return ""
-
-
-def _validate(path: str) -> None:
-    if not path or not (Path(path) / "config.json").exists():
-        print(f"ERROR: Model not found at: {path!r}")
-        print(f"  python {sys.argv[0]} --model-path /path/to/hf_model")
-        sys.exit(1)
-
-
-def _request(path: str, body: dict = None) -> dict:
+def _request(path: str, body: dict | None = None) -> dict:
     url = f"http://{HOST}:{PORT}{path}"
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(
@@ -62,7 +52,7 @@ def _request(path: str, body: dict = None) -> dict:
         return json.loads(content) if content else {}
 
 
-def _stream_request(path: str, body: dict):
+def _stream_request(path: str, body: dict) -> None:
     url = f"http://{HOST}:{PORT}{path}"
     data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, method="POST")
@@ -84,13 +74,12 @@ def _stream_request(path: str, body: dict):
         print()
 
 
-def start_server(model_path: str):
+def start_server(model_path: str) -> None:
+    """Entry point of the spawned server subprocess."""
     import logging
 
     import uvicorn
 
-    from minisgl.config import ModelArgs, ServerArgs
-    from minisgl.engine.engine import Engine
     from minisgl.scheduler.scheduler import Scheduler
     from minisgl.server.api import app, init_frontend
     from minisgl.tokenizer import TokenizerWorker
@@ -98,42 +87,26 @@ def start_server(model_path: str):
 
     setup_logger(level=logging.INFO)
 
-    args = ServerArgs(
-        model_path=model_path,
-        host=HOST,
-        port=PORT,
-        tp_size=1,
-        attention_backend="fa",
-        max_running_req=4,
-        max_seq_len=256,
-        page_size=16,
-        memory_ratio=0.5,
-        cuda_graph_bs=0,
-    )
-    model_args = ModelArgs.from_pretrained(model_path)
-    tokenizer = TokenizerWorker(model_path)
-    engine = Engine(args, model_args, tp_rank=0)
+    args, engine = build_engine(model_path, host=HOST, port=PORT, max_running_req=4)
     scheduler = Scheduler(args, engine)
+    tokenizer = TokenizerWorker(model_path)
     init_frontend(args, scheduler, tokenizer)
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
 
 
-if __name__ == "__main__":
+def main() -> None:
     import multiprocessing
 
     parser = argparse.ArgumentParser(description="Mini-SGLang Server Demo")
     parser.add_argument("--model-path", type=str, default=None)
     cli_args = parser.parse_args()
 
-    model_path = cli_args.model_path or _find_model(
-        "facebook/opt-125m", "Qwen/Qwen2.5-0.5B", "Qwen/Qwen3-0.6B"
-    )
-    _validate(model_path)
+    model_path = resolve_model_path(cli_args.model_path, *DEFAULT_MODEL_NAMES)
 
-    print("=" * 60)
-    print("  Mini-SGLang OpenAI API Server Demo")
-    print(f"  Model: {model_path}")
-    print("=" * 60)
+    banner(
+        "Mini-SGLang OpenAI API Server Demo",
+        lines=[f"Model: {model_path}"],
+    )
 
     server_proc = multiprocessing.Process(
         target=start_server, args=(model_path,), daemon=True
@@ -194,3 +167,7 @@ if __name__ == "__main__":
         print("=" * 60)
         server_proc.terminate()
         server_proc.join(timeout=5)
+
+
+if __name__ == "__main__":
+    main()

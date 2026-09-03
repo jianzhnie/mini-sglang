@@ -11,7 +11,13 @@ Usage:
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# Make examples/ importable for _common and the repo root importable for
+# minisgl (the two sys.path lines below are the standing pattern in every
+# example — see examples/_common.py).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # examples/
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # root
+
+from _common import banner, build_engine, drive, section
 
 
 def main() -> None:
@@ -21,14 +27,12 @@ def main() -> None:
     import torch
     import torch.nn as nn
 
-    from minisgl.config import ModelArgs, SamplingParams, ServerArgs
-    from minisgl.engine.engine import Engine
+    from minisgl.config import SamplingParams
     from minisgl.scheduler.scheduler import Scheduler
 
-    print("=" * 60)
-    print("  Mini-SGLang CPU Self-Contained Demo")
-    print("  (no model download required)")
-    print("=" * 60)
+    banner(
+        "Mini-SGLang CPU Self-Contained Demo", lines=["(no model download required)"]
+    )
 
     hidden_size = 128
     num_layers = 2
@@ -54,19 +58,15 @@ def main() -> None:
         with open(os.path.join(tmpdir, "config.json"), "w") as f:
             json.dump(config, f)
 
-        model_args = ModelArgs.from_pretrained(tmpdir)
-        server_args = ServerArgs(
-            model_path=tmpdir,
-            tp_size=1,
+        # A toy model with no pretrained weights: the demo seeds random weights
+        # so the pipeline is exercised end-to-end regardless of model quality.
+        server_args, engine = build_engine(
+            tmpdir,
             attention_backend="pt",
             max_running_req=4,
             max_seq_len=max_pos,
             page_size=8,
-            memory_ratio=0.5,
-            cuda_graph_bs=0,
         )
-
-        engine = Engine(server_args, model_args, tp_rank=0)
         gen = torch.Generator().manual_seed(42)
         for param in engine.model.parameters():
             if param.dim() >= 2:
@@ -81,27 +81,18 @@ def main() -> None:
         }
 
         for label, input_ids in prompts.items():
-            print(f"\n{'─' * 60}")
-            print(f"Prompt ({label}): token_ids={input_ids}")
+            section(f"Prompt ({label}): token_ids={input_ids}")
 
             scheduler = Scheduler(server_args, engine)
             scheduler.add_request(
                 input_ids, SamplingParams(temperature=0.0, max_tokens=8)
             )
+            generated = [out.token_id for out in drive(scheduler)]
 
-            generated: list[int] = []
-            while not scheduler.is_idle():
-                for out in scheduler.step():
-                    generated.append(out.token_id)
-                    if out.finished:
-                        break
+            print(f"  Generated:  token_ids={generated}")
+            print(f"  Tokens: {len(generated)}")
 
-            print(f"Generated:  token_ids={generated}")
-            print(f"Tokens: {len(generated)}")
-
-    print("\n" + "=" * 60)
-    print("  CPU DEMO COMPLETE")
-    print("=" * 60)
+    banner("CPU DEMO COMPLETE")
 
 
 if __name__ == "__main__":

@@ -135,6 +135,7 @@ curl http://127.0.0.1:8000/health
 
 ```
 examples/
+├── _common.py           # Shared helpers: model discovery, engine setup, generation loop
 ├── cpu_demo.py          # Dependency-free self-contained CPU demo (no model download)
 ├── offline_inference.py # Comprehensive offline inference: batch, LLM API, streaming, sampling strategies
 ├── benchmark.py         # Performance benchmark: prefill latency, decode throughput, end-to-end

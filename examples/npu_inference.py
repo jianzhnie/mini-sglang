@@ -23,32 +23,28 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# examples/ for _common, repo root for minisgl (see examples/_common.py).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # examples/
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # root
 
-MODELS_ROOT = "/home/jianzhnie/llmtuner/hfhub/models/Qwen"
+from _common import (  # noqa: E402
+    banner,
+    build_engine,
+    drive,
+    find_model,
+    load_tokenizer,
+)
 
-
-def _find_model(*names: str) -> str:
-    env_root = os.environ.get("MINISGL_MODELS", "")
-    roots = [
-        r
-        for r in [env_root, MODELS_ROOT, str(Path.home() / "hfhub" / "models" / "Qwen")]
-        if r
-    ]
-    for name in names:
-        for root in roots:
-            p = Path(root) / name
-            if p.is_dir() and (p / "config.json").exists():
-                return str(p)
-    return ""
+# Qwen checkpoints tested on Ascend live under this extra root on the author's
+# setup; --models looks here in addition to the standard roots.
+_QWEN_ROOT = str(Path.home() / "hfhub" / "models" / "Qwen")
 
 
 def test_model(model_path: str, max_tokens: int = 20) -> dict:
     """Run full inference test on one model. Returns metrics dict."""
     import torch
 
-    from minisgl.config import ModelArgs, SamplingParams, ServerArgs
-    from minisgl.engine.engine import Engine
+    from minisgl.config import SamplingParams
     from minisgl.scheduler.scheduler import Scheduler
     from minisgl.utils.device import get_device_type
 
@@ -66,27 +62,14 @@ def test_model(model_path: str, max_tokens: int = 20) -> dict:
     }
 
     try:
-        server_args = ServerArgs(
-            model_path=model_path,
-            tp_size=1,
-            attention_backend="pt",
-            max_running_req=8,
-            max_seq_len=256,
-            page_size=16,
-            memory_ratio=0.5,
-            cuda_graph_bs=0,
-        )
-        model_args = ModelArgs.from_pretrained(model_path)
-
+        # Time the engine construction (loads weights + allocates KV cache).
         t0 = time.perf_counter()
-        engine = Engine(server_args, model_args, tp_rank=0)
+        server_args, engine = build_engine(model_path, attention_backend="pt")
         result["load_time"] = time.perf_counter() - t0
 
-        from transformers import AutoTokenizer
+        tokenizer = load_tokenizer(model_path, trust_remote_code=True)
 
-        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-
-        # Single generation
+        # Single generation.
         scheduler = Scheduler(server_args, engine)
         prompt = "The meaning of life is"
         input_ids = tokenizer.encode(prompt)
@@ -96,19 +79,18 @@ def test_model(model_path: str, max_tokens: int = 20) -> dict:
         tokens = []
         t0 = time.perf_counter()
         ttft = None
-        while not scheduler.is_idle():
-            for out in scheduler.step():
-                if out.uid == uid:
-                    if ttft is None:
-                        ttft = time.perf_counter() - t0
-                    tokens.append(out.token_id)
+        for out in drive(scheduler):
+            if out.uid == uid:
+                if ttft is None:
+                    ttft = time.perf_counter() - t0
+                tokens.append(out.token_id)
         total_time = time.perf_counter() - t0
 
         result["output"] = tokenizer.decode(tokens, skip_special_tokens=True)[:80]
         result["prefill_tps"] = len(input_ids) / ttft if ttft else 0
         result["decode_tps"] = len(tokens) / total_time if total_time > 0 else 0
 
-        # Batch test: 3 prompts
+        # Batch test: 3 prompts.
         prompts = [
             "Python is a programming language",
             "The capital of France is",
@@ -120,8 +102,8 @@ def test_model(model_path: str, max_tokens: int = 20) -> dict:
 
         total_gen = 0
         t0 = time.perf_counter()
-        while not scheduler2.is_idle():
-            total_gen += len(scheduler2.step())
+        for _ in drive(scheduler2):
+            total_gen += 1
         batch_time = time.perf_counter() - t0
         result["batch_tps"] = total_gen / batch_time if batch_time > 0 else 0
 
@@ -138,13 +120,17 @@ def test_model(model_path: str, max_tokens: int = 20) -> dict:
 
 
 def main():
+    import torch
+
+    from minisgl.utils.device import get_device_type, is_npu_available, set_device
+
     parser = argparse.ArgumentParser(description="Mini-SGLang NPU Inference")
     parser.add_argument("--model-path", type=str, default=None)
     parser.add_argument(
         "--models",
         nargs="+",
         default=None,
-        help="Model names under MODELS_ROOT (e.g., Qwen3-0.6B)",
+        help="Model names (e.g., Qwen3-0.6B) to test in sequence",
     )
     parser.add_argument("--max-tokens", type=int, default=20)
     parser.add_argument(
@@ -152,29 +138,31 @@ def main():
     )
     args = parser.parse_args()
 
-    import torch
-
-    from minisgl.utils.device import get_device_type, is_npu_available, set_device
-
     if args.device != "auto":
         set_device(torch.device(args.device))
 
     device_type = get_device_type()
     npu_avail = is_npu_available()
 
-    print("=" * 60)
-    print("  Mini-SGLang NPU Inference Demo")
-    print(f"  Device: {device_type} | NPU available: {npu_avail}")
-    if npu_avail:
-        print(f"  NPU: {torch.npu.get_device_name(0)} x{torch.npu.device_count()}")
-    print(f"  Max tokens: {args.max_tokens}")
-    print("=" * 60)
+    npu_line = (
+        f"  NPU: {torch.npu.get_device_name(0)} x{torch.npu.device_count()}"
+        if npu_avail
+        else ""
+    )
+    banner(
+        "Mini-SGLang NPU Inference Demo",
+        lines=[
+            f"Device: {device_type} | NPU available: {npu_avail}",
+            npu_line,
+            f"Max tokens: {args.max_tokens}",
+        ],
+    )
 
-    # Determine which models to test
+    # Determine which models to test.
     if args.models:
         model_paths = []
         for name in args.models:
-            p = _find_model(name)
+            p = find_model(name, extra_roots=(_QWEN_ROOT,))
             if p:
                 model_paths.append(p)
             else:
@@ -182,7 +170,7 @@ def main():
     elif args.model_path:
         model_paths = [args.model_path]
     else:
-        p = _find_model("Qwen3-0.6B", "Qwen2.5-0.5B", "facebook/opt-125m")
+        p = find_model("Qwen3-0.6B", "Qwen2.5-0.5B", "facebook/opt-125m")
         if not p:
             print("ERROR: No model found. Use --model-path or --models")
             sys.exit(1)
@@ -208,7 +196,7 @@ def main():
             print("  Status:  FAIL")
             print(f"  Error:   {r['error']}")
 
-    # Summary
+    # Summary.
     if len(results) > 1:
         print(f"\n{'=' * 60}")
         print("  SUMMARY")
