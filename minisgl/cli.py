@@ -59,8 +59,8 @@ def parse_args() -> ServerArgs:
         "--attention-backend",
         type=str,
         default="fa",
-        choices=["fa", "fi", "fa,fi", "pt"],
-        help="Attention backend: fa (FlashAttention), fi (FlashInfer), pt (PyTorch)",
+        choices=["fa", "pt"],
+        help="Attention backend: fa (FlashAttention, falls back to PyTorch), pt (PyTorch SDPA)",
     )
     parser.add_argument(
         "--device",

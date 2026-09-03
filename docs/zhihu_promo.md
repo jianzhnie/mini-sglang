@@ -110,4 +110,4 @@ python examples/cpu_demo.py
 
 ---
 
-*参考项目：[SGLang](https://github.com/sgl-project/sglang)（架构蓝本）、[vLLM](https://github.com/vllm-project/vllm)（PagedAttention 参考）、[FlashAttention](https://github.com/Dao-AILab/flash-attention) / [FlashInfer](https://github.com/flashinfer-ai/flashinfer)（Attention kernel）*
+*参考项目：[SGLang](https://github.com/sgl-project/sglang)（架构蓝本）、[vLLM](https://github.com/vllm-project/vllm)（PagedAttention 参考）、[FlashAttention](https://github.com/Dao-AILab/flash-attention)（Attention kernel）*

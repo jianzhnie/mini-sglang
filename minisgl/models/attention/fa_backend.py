@@ -1,17 +1,13 @@
-"""FlashAttention and FlashInfer attention backends.
+"""FlashAttention backend.
 
-Holds the flash-attn / flashinfer availability detection and exports it
-(``_FLASH_ATTN_AVAILABLE``, ``_FLASHINFER_AVAILABLE``) for the dispatcher.
-``FlashInferBackend`` is a stub: flashinfer is not implemented, so every
-call is delegated to FlashAttention.
+Detects whether the optional ``flash_attn`` package is installed and exposes
+``_FLASH_ATTN_AVAILABLE`` plus the varlen / paged-KV functions for the
+dispatcher.
 """
 
 from __future__ import annotations
 
-__all__ = [
-    "FlashAttentionBackend",
-    "FlashInferBackend",
-]
+__all__ = ["FlashAttentionBackend"]
 import math
 
 import torch
@@ -19,7 +15,6 @@ import torch
 from minisgl.models.attention.metadata import AttentionMetadata
 
 _FLASH_ATTN_AVAILABLE = False
-_FLASHINFER_AVAILABLE = False
 flash_attn_varlen_func = None
 flash_attn_with_kvcache = None
 
@@ -27,13 +22,6 @@ try:
     from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
     _FLASH_ATTN_AVAILABLE = True
-except ImportError:
-    pass
-
-try:
-    import flashinfer  # noqa: F401
-
-    _FLASHINFER_AVAILABLE = True
 except ImportError:
     pass
 
@@ -177,27 +165,3 @@ class FlashAttentionBackend:
             )
             out_flat[start:end] = out_i[0]
         return out_flat
-
-
-class FlashInferBackend:
-    """FlashInfer is NOT implemented — this is a stub that delegates to FA.
-
-    The class exists so that ``--attention-backend fi`` (or ``fa,fi``) parses
-    and runs, but every forward call goes straight to FlashAttentionBackend.
-    A real implementation would use flashinfer's prefill/decode runners with
-    the paged KV cache.
-    """
-
-    @staticmethod
-    def forward(
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        k_cache: torch.Tensor | None = None,
-        v_cache: torch.Tensor | None = None,
-        attn_meta: AttentionMetadata | None = None,
-    ) -> torch.Tensor:
-        if not _FLASHINFER_AVAILABLE:
-            msg = "flashinfer not installed"
-            raise RuntimeError(msg)
-        return FlashAttentionBackend.forward(q, k, v, k_cache, v_cache, attn_meta)

@@ -5,10 +5,6 @@ backend name:
 
 - "fa": FlashAttention (if installed), else PyTorch SDPA fallback.
 - "pt": always PyTorch SDPA (works on CUDA, NPU, CPU).
-- "fi": FlashInfer is NOT implemented; the backend class delegates every
-  call to FlashAttention (see FlashInferBackend in fa_backend.py).
-- "fa,fi": hybrid — equivalent to "fa" today, everything runs on
-  FlashAttention.
 """
 
 __all__ = ["AttentionBackend"]
@@ -16,9 +12,7 @@ import torch
 
 from minisgl.models.attention.fa_backend import (
     _FLASH_ATTN_AVAILABLE,
-    _FLASHINFER_AVAILABLE,
     FlashAttentionBackend,
-    FlashInferBackend,
 )
 from minisgl.models.attention.metadata import AttentionMetadata
 from minisgl.models.attention.pt_backend import PyTorchBackend
@@ -37,7 +31,7 @@ class AttentionBackend:
         """Set the attention backend.
 
         Args:
-            backend: "fa" (FlashAttention), "fi" (FlashInfer), or "fa,fi" (hybrid).
+            backend: "fa" (FlashAttention) or "pt" (PyTorch SDPA).
         """
         cls._backend_name = backend
 
@@ -54,21 +48,14 @@ class AttentionBackend:
         """Compute attention output. Routes to the configured backend.
 
         Backend selection:
-        - "fi": FlashInfer (if available)
         - "fa": FlashAttention (if available), else PyTorch fallback
         - "pt": Always use PyTorch SDPA (works on CUDA, NPU, CPU)
 
         On NPU devices, PyTorch backend is used automatically since
         flash_attn is not available. torch_npu provides SDPA acceleration.
         """
-        backend = cls._backend_name
-
-        if backend == "pt":
+        if cls._backend_name == "pt":
             return PyTorchBackend.forward(q, k, v, k_cache, v_cache, attn_meta)
-
-        if "fi" in backend and _FLASHINFER_AVAILABLE:
-            return FlashInferBackend.forward(q, k, v, k_cache, v_cache, attn_meta)
-        elif _FLASH_ATTN_AVAILABLE:
+        if _FLASH_ATTN_AVAILABLE:
             return FlashAttentionBackend.forward(q, k, v, k_cache, v_cache, attn_meta)
-        else:
-            return PyTorchBackend.forward(q, k, v, k_cache, v_cache, attn_meta)
+        return PyTorchBackend.forward(q, k, v, k_cache, v_cache, attn_meta)

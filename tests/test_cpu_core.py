@@ -115,15 +115,11 @@ class TestAttentionBackend(unittest.TestCase):
         """minisgl.models.attention re-exports must alias the submodule classes."""
         import minisgl.models.attention as attn_pkg
         from minisgl.models.attention.dispatcher import AttentionBackend
-        from minisgl.models.attention.fa_backend import (
-            FlashAttentionBackend,
-            FlashInferBackend,
-        )
+        from minisgl.models.attention.fa_backend import FlashAttentionBackend
         from minisgl.models.attention.pt_backend import PyTorchBackend
 
         self.assertIs(attn_pkg.AttentionBackend, AttentionBackend)
         self.assertIs(attn_pkg.FlashAttentionBackend, FlashAttentionBackend)
-        self.assertIs(attn_pkg.FlashInferBackend, FlashInferBackend)
         self.assertIs(attn_pkg.PyTorchBackend, PyTorchBackend)
 
 

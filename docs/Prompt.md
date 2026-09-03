@@ -155,9 +155,8 @@ class SamplingParams:
 ## 关键架构决策
 
 ### Attention 后端（可插拔）
-- **FlashAttention** (`fa`): 通用后端，兼容性好
+- **FlashAttention** (`fa`): 通用后端，不可用时自动回退 PyTorch SDPA
 - **PyTorch SDPA** (`pt`): 纯 PyTorch 参考实现（CPU/NPU 也用它），支持 extend attention
-- **FlashInfer** (`fi`): 尚未实现——选择后转调 `fa`；`fa,fi`（hybrid）目前同样全部走 `fa`
 
 ### KV Cache 管理
 - **PagedAttention**: 将 KV Cache 划分为固定大小的 page（默认 16 tokens）
@@ -256,6 +255,5 @@ python -m minisgl --model-path Qwen/Qwen3-0.6B --shell
 ## 参考项目
 - [SGLang](https://github.com/sgl-project/sglang) — 架构蓝本
 - [vLLM](https://github.com/vllm-project/vllm) — PagedAttention 参考
-- [FlashInfer](https://github.com/flashinfer-ai/flashinfer) — Attention kernel
 - [FlashAttention](https://github.com/Dao-AILab/flash-attention) — Attention kernel
 - [mini-vllm](https://github.com/jianzhnie/mini-vllm) — 姊妹教学项目

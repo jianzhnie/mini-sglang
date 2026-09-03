@@ -38,8 +38,7 @@ dependencies = [
 [project.optional-dependencies]
 moe = ["triton>=2.1"]
 flash-attn = ["flash-attn>=2.0"]
-flashinfer = ["flashinfer>=0.2"]
-all = ["mini-sglang[moe,flash-attn,flashinfer]"]
+all = ["mini-sglang[moe,flash-attn]"]
 
 dev = [
     "pytest>=7.0",

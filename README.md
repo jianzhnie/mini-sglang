@@ -18,7 +18,7 @@
 - **CUDA / NPU Graph** — decode-phase kernel launch overhead elimination (NVIDIA CUDA and Huawei Ascend NPU)
 - **Tensor Parallelism** — Column / Row Parallel Linear layers are ready; multi-process TP launch is not yet implemented (`--tp-size > 1` exits with an error)
 - **Multi-device** — NVIDIA CUDA / Huawei Ascend NPU / CPU, with automatic detection priority
-- **Pluggable Attention Backends** — FlashAttention (`fa`) / PyTorch SDPA (`pt`); `fi` (FlashInfer) is not implemented yet and forwards to `fa`
+- **Pluggable Attention Backends** — FlashAttention (`fa`, auto-falls back to PyTorch SDPA when unavailable) / PyTorch SDPA (`pt`)
 - **OpenAI-compatible API** — `/v1/chat/completions` + `/v1/completions` + SSE streaming
 
 ## Architecture
@@ -55,8 +55,8 @@ KV Cache Pool + RadixCache + CUDA/NPU Graphs
 pip install -e .
 # or install dependencies manually
 pip install torch transformers fastapi uvicorn safetensors
-# optional: high-performance attention backends
-pip install flash-attn flashinfer
+# optional: high-performance attention backend
+pip install flash-attn
 ```
 
 ### Launching the Server
@@ -90,7 +90,7 @@ python -m minisgl --model-path Qwen/Qwen3-0.6B --shell
 | `--max-seq-len` | `8192` | Maximum sequence length |
 | `--page-size` | `16` | KV cache page size (tokens) |
 | `--cuda-graph-bs` | `None` | Maximum batch size for graph capture (CUDA/NPU) |
-| `--attention-backend` | `fa` | Attention backend: `fa` / `fi` (not implemented, forwards to `fa`) / `fa,fi` / `pt` |
+| `--attention-backend` | `fa` | Attention backend: `fa` (FlashAttention, falls back to PyTorch SDPA) / `pt` (PyTorch SDPA) |
 | `--dtype` | `auto` | Model precision: `auto` (reads config.json) / `float16` / `bfloat16` / `float32` (CPU forces float32) |
 | `--trust-remote-code` | `False` | Trust custom code from HF models |
 | `--log-level` | `INFO` | Log level: `DEBUG` / `INFO` / `WARNING` / `ERROR` |
@@ -272,6 +272,5 @@ docker run --privileged -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
 
 - [SGLang](https://github.com/sgl-project/sglang) — architectural blueprint
 - [vLLM](https://github.com/vllm-project/vllm) — PagedAttention reference
-- [FlashInfer](https://github.com/flashinfer-ai/flashinfer) — attention kernels
 - [FlashAttention](https://github.com/Dao-AILab/flash-attention) — attention kernels
 - [torch_npu](https://gitee.com/ascend/pytorch) — Huawei Ascend NPU PyTorch backend

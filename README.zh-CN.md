@@ -18,7 +18,7 @@
 - **CUDA / NPU Graph** — Decode 阶段 kernel launch overhead 优化（支持 NVIDIA CUDA 和华为 Ascend NPU）
 - **Tensor Parallelism** — Column / Row Parallel Linear 层逻辑已就绪；多进程 TP 启动尚未实现（`--tp-size > 1` 会直接报错退出）
 - **多设备支持** — NVIDIA CUDA / 华为 Ascend NPU / CPU，自动检测优先级
-- **可插拔 Attention 后端** — FlashAttention (`fa`) / PyTorch SDPA (`pt`)；`fi`（FlashInfer）尚未实现，选择后转调 `fa`
+- **可插拔 Attention 后端** — FlashAttention (`fa`，不可用时自动回退 PyTorch SDPA) / PyTorch SDPA (`pt`)
 - **OpenAI 兼容 API** — `/v1/chat/completions` + `/v1/completions` + SSE 流式返回
 
 ## 架构概览
@@ -56,7 +56,7 @@ pip install -e .
 # 或手动安装依赖
 pip install torch transformers fastapi uvicorn safetensors
 # 可选：高性能 attention 后端
-pip install flash-attn flashinfer
+pip install flash-attn
 ```
 
 ### 启动服务
@@ -89,7 +89,7 @@ python -m minisgl --model-path Qwen/Qwen3-0.6B --shell
 | `--max-seq-len` | `8192` | 最大序列长度 |
 | `--page-size` | `16` | KV Cache 页大小（tokens） |
 | `--cuda-graph-bs` | `None` | Graph 捕获的最大 batch size（CUDA/NPU） |
-| `--attention-backend` | `fa` | 注意力后端：`fa` / `fi`（未实现，转调 `fa`）/ `fa,fi` / `pt` |
+| `--attention-backend` | `fa` | 注意力后端：`fa`（FlashAttention，不可用回退 PyTorch SDPA）/ `pt`（PyTorch SDPA） |
 | `--dtype` | `auto` | 模型精度：`auto`（读 config.json）/ `float16` / `bfloat16` / `float32`（CPU 强制 float32） |
 | `--trust-remote-code` | `False` | 信任 HF 模型的自定义代码 |
 | `--log-level` | `INFO` | 日志级别：`DEBUG` / `INFO` / `WARNING` / `ERROR` |
@@ -270,6 +270,5 @@ docker run --privileged -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
 
 - [SGLang](https://github.com/sgl-project/sglang) — 架构蓝本
 - [vLLM](https://github.com/vllm-project/vllm) — PagedAttention 参考
-- [FlashInfer](https://github.com/flashinfer-ai/flashinfer) — Attention kernel
 - [FlashAttention](https://github.com/Dao-AILab/flash-attention) — Attention kernel
 - [torch_npu](https://gitee.com/ascend/pytorch) — 华为 Ascend NPU PyTorch 后端
