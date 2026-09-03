@@ -81,7 +81,7 @@ class BaseAttention(nn.Module):
         k: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
-        """Apply RoPE to Q and K. Override to skip for models without RoPE (e.g., OPT)."""
+        """Apply RoPE to Q and K. Override to skip for models without RoPE."""
         self.rotary_emb(q, k, positions)
 
     def _reshape_for_attention(

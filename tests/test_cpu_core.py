@@ -520,34 +520,6 @@ class TestTokenizerWorker(unittest.TestCase):
 
 # ── Test Full Model (Dummy) ──
 class TestModelDummy(unittest.TestCase):
-    def test_qwen2_model_create(self):
-        """Create a tiny Qwen2 model and run a forward pass."""
-        from minisgl.config import ModelArgs
-        from minisgl.models.qwen2 import Qwen2ForCausalLM
-
-        config = ModelArgs(
-            hidden_size=128,
-            num_layers=2,
-            num_attention_heads=4,
-            num_kv_heads=4,
-            intermediate_size=512,
-            vocab_size=1000,
-            max_position_embeddings=128,
-            head_dim=32,
-            rms_norm_eps=1e-6,
-        )
-
-        model = Qwen2ForCausalLM(config)
-        model.eval()
-
-        input_ids = torch.randint(0, 1000, (1, 8))  # 1 req, 8 tokens
-        positions = torch.arange(8)
-
-        with torch.inference_mode():
-            logits = model(input_ids=input_ids, positions=positions)
-
-        self.assertEqual(logits.shape, (1, 8, 1000))
-
     def test_qwen3_model_create(self):
         from minisgl.config import ModelArgs
         from minisgl.models.qwen3 import Qwen3ForCausalLM
@@ -569,15 +541,25 @@ class TestModelDummy(unittest.TestCase):
                 nn.init.xavier_uniform_(module.weight, gain=0.5)
         model.eval()
 
+        # Single sequence.
         input_ids = torch.randint(0, 1000, (1, 8))
         positions = torch.arange(8)
         with torch.inference_mode():
             logits = model(input_ids=input_ids, positions=positions)
         self.assertEqual(logits.shape, (1, 8, 1000))
 
-    def test_llama_model_create(self):
+        # Batched (2 requests) — the RMSNorm + RoPE backbone is shared by every
+        # dense model in the family, so one batched forward covers the layout.
+        input_ids = torch.randint(0, 1000, (2, 6))
+        positions = torch.arange(6)
+        with torch.inference_mode():
+            logits = model(input_ids=input_ids, positions=positions)
+        self.assertEqual(logits.shape, (2, 6, 1000))
+
+    def test_qwen3_without_qk_norm_gqa(self):
+        """Qwen3 without qk_norm + num_kv_heads == num_heads is the dense path."""
         from minisgl.config import ModelArgs
-        from minisgl.models.llama import LlamaForCausalLM
+        from minisgl.models.qwen3 import Qwen3ForCausalLM
 
         config = ModelArgs(
             hidden_size=128,
@@ -588,31 +570,9 @@ class TestModelDummy(unittest.TestCase):
             vocab_size=1000,
             max_position_embeddings=128,
             head_dim=32,
+            qk_norm=False,
         )
-        model = LlamaForCausalLM(config)
-        model.eval()
-        input_ids = torch.randint(0, 1000, (2, 6))
-        positions = torch.arange(6)
-        with torch.inference_mode():
-            logits = model(input_ids=input_ids, positions=positions)
-        self.assertEqual(logits.shape, (2, 6, 1000))
-
-    def test_mistral_model_create(self):
-        from minisgl.config import ModelArgs
-        from minisgl.models.mistral import MistralForCausalLM
-
-        config = ModelArgs(
-            hidden_size=128,
-            num_layers=2,
-            num_attention_heads=4,
-            num_kv_heads=2,
-            intermediate_size=512,
-            vocab_size=1000,
-            max_position_embeddings=128,
-            head_dim=32,
-            sliding_window=4096,
-        )
-        model = MistralForCausalLM(config)
+        model = Qwen3ForCausalLM(config)
         model.eval()
         input_ids = torch.randint(0, 1000, (1, 8))
         positions = torch.arange(8)
@@ -623,7 +583,7 @@ class TestModelDummy(unittest.TestCase):
     def test_deep_decoder_forward(self):
         """Test forward pass through multiple layers with residual flow."""
         from minisgl.config import ModelArgs
-        from minisgl.models.qwen2 import Qwen2ForCausalLM
+        from minisgl.models.qwen3 import Qwen3ForCausalLM
 
         config = ModelArgs(
             hidden_size=128,
@@ -636,7 +596,7 @@ class TestModelDummy(unittest.TestCase):
             head_dim=32,
         )
         gen = torch.Generator().manual_seed(123)
-        model = Qwen2ForCausalLM(config)
+        model = Qwen3ForCausalLM(config)
         for _name, param in model.named_parameters():
             if param.dim() >= 2:
                 nn.init.normal_(param, std=0.02, generator=gen)
@@ -658,7 +618,7 @@ class TestModelDummy(unittest.TestCase):
         from minisgl.config import ModelArgs
         from minisgl.engine.kvcache.pool import KVCachePool
         from minisgl.models.attention.metadata import AttentionMetadata
-        from minisgl.models.qwen2 import Qwen2ForCausalLM
+        from minisgl.models.qwen3 import Qwen3ForCausalLM
 
         config = ModelArgs(
             hidden_size=128,
@@ -670,7 +630,7 @@ class TestModelDummy(unittest.TestCase):
             max_position_embeddings=128,
             head_dim=32,
         )
-        model = Qwen2ForCausalLM(config)
+        model = Qwen3ForCausalLM(config)
         for module in model.modules():
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight, gain=0.5)
@@ -851,58 +811,7 @@ class TestQwen3MoEModel(unittest.TestCase):
         self.assertTrue(torch.all(mlp.expert_down[1] == 2.0))
 
 
-# ── Test OPT tie_weights ──
-class TestOPTTieWeights(unittest.TestCase):
-    def test_tie_weights_binds_lm_head(self):
-        from minisgl.config import ModelArgs
-        from minisgl.models.opt import OPTForCausalLM
-
-        config = ModelArgs(
-            hidden_size=32,
-            num_layers=1,
-            num_attention_heads=2,
-            num_kv_heads=2,
-            intermediate_size=64,
-            vocab_size=50,
-            max_position_embeddings=16,
-            head_dim=16,
-            tie_word_embeddings=True,
-        )
-        model = OPTForCausalLM(config)
-        embed = torch.randn(50, 32)
-        # HF key after the registry's model. -> model.decoder. remap.
-        state_dict = {"model.decoder.embed_tokens.weight": embed}
-        model.tie_weights(state_dict)
-        self.assertTrue(torch.equal(model.lm_head.weight.data, embed))
-
-    def test_tie_weights_skips_untied_checkpoint(self):
-        from minisgl.config import ModelArgs
-        from minisgl.models.opt import OPTForCausalLM
-
-        config = ModelArgs(
-            hidden_size=32,
-            num_layers=1,
-            num_attention_heads=2,
-            num_kv_heads=2,
-            intermediate_size=64,
-            vocab_size=50,
-            max_position_embeddings=16,
-            head_dim=16,
-            tie_word_embeddings=True,
-        )
-        model = OPTForCausalLM(config)
-        lm_head = torch.randn(50, 32)
-        state_dict = {
-            "lm_head.weight": lm_head,
-            "model.decoder.embed_tokens.weight": torch.randn(50, 32),
-        }
-        before = model.lm_head.weight.data.clone()
-        model.tie_weights(state_dict)
-        # Untied lm_head in checkpoint: leave it untouched.
-        self.assertTrue(torch.equal(model.lm_head.weight.data, before))
-
-
-# ── Test Sliding Window (Mistral) ──
+# ── Test Sliding Window ──
 class TestSlidingWindow(unittest.TestCase):
     def test_prefill_band_mask(self):
         """PT prefill with sliding_window: query i attends keys [i-w+1, i]."""
@@ -1024,20 +933,6 @@ class TestRegistry(unittest.TestCase):
         # Should not crash on non-existent path
         self.assertTrue(True)  # Module loaded OK
 
-    def test_get_remap_fn_opt(self):
-        from minisgl.models.registry import get_remap_fn
-
-        # OPT checkpoints nest weights under model.decoder.*; the remap inserts
-        # the "decoder." segment that our OPT module layout expects.
-        remap = get_remap_fn("opt")
-        self.assertIsNotNone(remap)
-        self.assertEqual(
-            remap("model.embed_tokens.weight"), "model.decoder.embed_tokens.weight"
-        )
-        # Other architectures load HF keys verbatim.
-        self.assertIsNone(get_remap_fn("qwen2"))
-        self.assertIsNone(get_remap_fn("llama"))
-
     def test_create_model(self):
         from minisgl.config import ModelArgs
         from minisgl.models.registry import create_model
@@ -1052,7 +947,7 @@ class TestRegistry(unittest.TestCase):
             max_position_embeddings=64,
             head_dim=64,
         )
-        for mt in ["qwen2", "qwen3", "llama", "mistral"]:
+        for mt in ["qwen3", "qwen3_moe"]:
             model = create_model(config, model_type=mt)
             # Apply initialization to prevent NaN
             for module in model.modules():
@@ -1192,31 +1087,6 @@ class TestRadixCacheEvictRemove(unittest.TestCase):
         radix.insert(tokens, handle)
         evicted = radix.evict(1)
         self.assertEqual(len(evicted), 0)
-
-
-# ── Test OPT Model ──
-class TestOPTModel(unittest.TestCase):
-    def test_opt_forward(self):
-        from minisgl.config import ModelArgs
-        from minisgl.models.opt import OPTForCausalLM
-
-        config = ModelArgs(
-            hidden_size=128,
-            num_layers=2,
-            num_attention_heads=4,
-            num_kv_heads=4,
-            intermediate_size=512,
-            vocab_size=1000,
-            max_position_embeddings=128,
-            head_dim=32,
-        )
-        model = OPTForCausalLM(config)
-        model.eval()
-        input_ids = torch.randint(0, 1000, (1, 8))
-        positions = torch.arange(8)
-        with torch.inference_mode():
-            logits = model(input_ids=input_ids, positions=positions)
-        self.assertEqual(logits.shape, (1, 8, 1000))
 
 
 # ── Test DecodeManager ──
@@ -1454,7 +1324,7 @@ class TestSharedDecoder(unittest.TestCase):
     def test_rmsnorm_decoder_layer(self):
         from minisgl.config import ModelArgs
         from minisgl.models.base import RMSNormDecoderLayer
-        from minisgl.models.llama import LlamaAttention
+        from minisgl.models.qwen3 import Qwen3Attention
 
         config = ModelArgs(
             hidden_size=128,
@@ -1469,7 +1339,7 @@ class TestSharedDecoder(unittest.TestCase):
         layer = RMSNormDecoderLayer(
             hidden_size=128,
             rms_norm_eps=1e-6,
-            attention=LlamaAttention(config),
+            attention=Qwen3Attention(config),
             intermediate_size=512,
         )
         x = torch.randn(1, 8, 128)
@@ -1477,11 +1347,11 @@ class TestSharedDecoder(unittest.TestCase):
         out = layer(x, positions)
         self.assertEqual(out.shape, (1, 8, 128))
 
-    def test_llama_inherits_tie_weights(self):
+    def test_qwen3_inherits_tie_weights(self):
         from minisgl.models.base import RMSNormForCausalLM
-        from minisgl.models.llama import LlamaForCausalLM
+        from minisgl.models.qwen3 import Qwen3ForCausalLM
 
-        self.assertTrue(issubclass(LlamaForCausalLM, RMSNormForCausalLM))
+        self.assertTrue(issubclass(Qwen3ForCausalLM, RMSNormForCausalLM))
 
 
 # ── Test End-to-End Scheduler Loop ──
@@ -1506,7 +1376,7 @@ class TestEndToEndScheduler(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         config = {
-            "architectures": ["OPTForCausalLM"],
+            "architectures": ["Qwen3ForCausalLM"],
             "hidden_size": 128,
             "num_hidden_layers": 2,
             "num_attention_heads": 4,
@@ -2151,7 +2021,7 @@ class TestWriteLocGuard(unittest.TestCase):
         # must be skipped; otherwise they write into the LAST rows of the KV
         # cache and corrupt whatever sequence lives there.
         from minisgl.config import ModelArgs
-        from minisgl.models.llama import LlamaAttention
+        from minisgl.models.qwen3 import Qwen3Attention
 
         config = ModelArgs(
             hidden_size=64,
@@ -2163,7 +2033,7 @@ class TestWriteLocGuard(unittest.TestCase):
             max_position_embeddings=64,
             head_dim=16,
         )
-        attn = LlamaAttention(config)
+        attn = Qwen3Attention(config)
 
         num_kv_heads, head_dim = 2, 16
         k_cache = torch.zeros(2, 4, num_kv_heads, head_dim)  # 8 flat slots

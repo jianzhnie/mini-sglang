@@ -1,8 +1,8 @@
 """Mini-SGLang: A lightweight educational LLM inference framework.
 
 Usage:
-    python -m minisgl --model-path Qwen/Qwen2-0.5B-Instruct --port 8000
-    python -m minisgl --model-path Qwen/Qwen2-0.5B-Instruct --shell
+    python -m minisgl --model-path Qwen/Qwen3-0.6B --port 8000
+    python -m minisgl --model-path Qwen/Qwen3-0.6B --shell
 """
 
 from minisgl.config import SamplingParams, ServerArgs

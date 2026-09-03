@@ -25,9 +25,9 @@ if TYPE_CHECKING:
 
 # Models each demo auto-detects when --model-path is omitted.
 DEFAULT_MODEL_NAMES: tuple[str, ...] = (
-    "facebook/opt-125m",
-    "Qwen/Qwen2.5-0.5B",
     "Qwen/Qwen3-0.6B",
+    "Qwen/Qwen3-1.7B",
+    "Qwen/Qwen3-4B",
 )
 
 

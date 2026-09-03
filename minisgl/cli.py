@@ -1,8 +1,8 @@
 """Command-line interface for mini-sglang.
 
 Usage:
-    python -m minisgl --model-path Qwen/Qwen2-0.5B-Instruct --port 8000
-    python -m minisgl --model-path Qwen/Qwen2-0.5B-Instruct --shell
+    python -m minisgl --model-path Qwen/Qwen3-0.6B --port 8000
+    python -m minisgl --model-path Qwen/Qwen3-0.6B --shell
 """
 
 __all__ = ["main", "parse_args", "run_server", "run_shell"]

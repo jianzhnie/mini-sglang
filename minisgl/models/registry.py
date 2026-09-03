@@ -1,17 +1,13 @@
 """Model registry for auto-detection and instantiation.
 
-Supports all model architectures:
-- OPTForCausalLM
-- Qwen2ForCausalLM
+Supports the Qwen3 family:
 - Qwen3ForCausalLM
 - Qwen3MoEForCausalLM
-- LlamaForCausalLM
-- MistralForCausalLM
 """
 
 from __future__ import annotations
 
-__all__ = ["create_model", "detect_model_type", "get_remap_fn"]
+__all__ = ["create_model", "detect_model_type"]
 import importlib
 import json
 from pathlib import Path
@@ -27,12 +23,8 @@ if TYPE_CHECKING:
 
 # Registry: model_type → (lazy_import_path, class_name)
 _MODEL_ENTRYPOINTS: dict[str, tuple[str, str]] = {
-    "qwen2": ("minisgl.models.qwen2", "Qwen2ForCausalLM"),
     "qwen3": ("minisgl.models.qwen3", "Qwen3ForCausalLM"),
     "qwen3_moe": ("minisgl.models.qwen3_moe", "Qwen3MoEForCausalLM"),
-    "llama": ("minisgl.models.llama", "LlamaForCausalLM"),
-    "mistral": ("minisgl.models.mistral", "MistralForCausalLM"),
-    "opt": ("minisgl.models.opt", "OPTForCausalLM"),
 }
 
 
@@ -43,7 +35,7 @@ def detect_model_type(model_path: str) -> str:
         model_path: Path to the HF model directory.
 
     Returns:
-        Model type string (e.g. "qwen2", "llama", "opt").
+        Model type string ("qwen3" or "qwen3_moe").
     """
     config_file = Path(model_path) / "config.json"
     with config_file.open() as f:
@@ -57,38 +49,18 @@ def detect_model_type(model_path: str) -> str:
             return "qwen3_moe"
         if "qwen3" in arch_lower:
             return "qwen3"
-        if "qwen2" in arch_lower:
-            return "qwen2"
-        if "llama" in arch_lower:
-            return "llama"
-        if "opt" in arch_lower:
-            return "opt"
-        if "mistral" in arch_lower:
-            return "mistral"
 
-    # Fallback heuristics
+    # Fallback heuristics (for configs that omit `architectures`).
     if cfg.get("num_experts", 0) > 0:
         return "qwen3_moe"
     if cfg.get("qk_norm", False):
         return "qwen3"
-    if cfg.get("use_sliding_window", False):
-        return "mistral"
 
     logger.warning(
-        f"Could not detect model type from architectures: {architectures}. Defaulting to qwen2.",
+        f"Could not detect model type from architectures: {architectures}. "
+        "Only the Qwen3 family is supported; defaulting to qwen3.",
     )
-    return "qwen2"
-
-
-def get_remap_fn(model_type: str):
-    """Return a key remapping function for the given model type."""
-    if model_type == "opt":
-
-        def _remap(name: str) -> str:
-            return name.replace("model.", "model.decoder.")
-
-        return _remap
-    return None
+    return "qwen3"
 
 
 def create_model(config: ModelArgs, model_type: str) -> nn.Module:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Self-contained CPU demo — no model download required.
 
-Creates a tiny random-weight OPT model and runs the full
+Creates a tiny random-weight Qwen3 model and runs the full
 Engine → Scheduler → Generate pipeline on CPU.
 
 Usage:
@@ -44,7 +44,7 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         config = {
-            "architectures": ["OPTForCausalLM"],
+            "architectures": ["Qwen3ForCausalLM"],
             "hidden_size": hidden_size,
             "num_hidden_layers": num_layers,
             "num_attention_heads": num_heads,
@@ -53,6 +53,7 @@ def main() -> None:
             "vocab_size": vocab_size,
             "max_position_embeddings": max_pos,
             "ffn_dim": intermediate_size,
+            "qk_norm": False,
             "eos_token_id": 2,
         }
         with open(os.path.join(tmpdir, "config.json"), "w") as f:

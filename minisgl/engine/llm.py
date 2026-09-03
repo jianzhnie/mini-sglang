@@ -2,7 +2,7 @@
 
 Usage:
     from minisgl import LLM
-    with LLM(model_path="Qwen/Qwen2-0.5B-Instruct") as llm:
+    with LLM(model_path="Qwen/Qwen3-0.6B") as llm:
         output = llm.generate(["Hello, world!", "What is AI?"])
 """
 

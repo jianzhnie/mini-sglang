@@ -13,7 +13,7 @@ Prerequisites:
 
 Usage:
     python examples/npu_inference.py --model-path /path/to/model
-    python examples/npu_inference.py --models Qwen3-0.6B Qwen2.5-0.5B
+    python examples/npu_inference.py --models Qwen3-0.6B Qwen3-1.7B
     python examples/npu_inference.py --model-path /path/to/model --device cpu  # fallback test
 """
 
@@ -170,7 +170,7 @@ def main():
     elif args.model_path:
         model_paths = [args.model_path]
     else:
-        p = find_model("Qwen3-0.6B", "Qwen2.5-0.5B", "facebook/opt-125m")
+        p = find_model("Qwen3-0.6B", "Qwen3-1.7B", "Qwen3-4B")
         if not p:
             print("ERROR: No model found. Use --model-path or --models")
             sys.exit(1)

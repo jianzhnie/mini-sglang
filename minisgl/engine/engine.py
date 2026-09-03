@@ -210,20 +210,17 @@ class Engine:
 
     def _load_weights(self) -> None:
         """Load HF weights from the model path, if it exists on disk."""
-        from minisgl.models.registry import get_remap_fn
-
         model_path = self.server_args.model_path
         if not (model_path and _path_exists(model_path)):
             return
         state_dict = load_hf_weights(model_path)
         model_type = self._model_type
-        remap_fn = get_remap_fn(model_type)
+        # The Qwen3 family loads HF keys verbatim — no remapping needed.
         loaded = load_weights_parallel(
             self.model,
             state_dict,
             self.tp_rank,
             self.tp_size,
-            remap_fn=remap_fn,
         )
         logger.info("Loaded %d weights (model_type=%s)", loaded, model_type)
         if hasattr(self.model, "tie_weights"):

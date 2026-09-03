@@ -63,7 +63,7 @@ pip install flash-attn flashinfer
 
 ```bash
 # Single GPU (CUDA)
-python -m minisgl --model-path Qwen/Qwen2.5-0.5B --port 8000
+python -m minisgl --model-path Qwen/Qwen3-0.6B --port 8000
 
 # Huawei Ascend NPU
 python -m minisgl --model-path Qwen/Qwen3-0.6B --device npu --attention-backend pt
@@ -238,14 +238,12 @@ python examples/npu_inference.py --models Qwen3-0.6B Qwen2.5-0.5B Qwen2.5-1.5B Q
 
 ## Supported Models
 
+Mini-SGLang supports the **Qwen3 family** of dense decoder-only transformers.
+
 | Model | Architecture highlights | CUDA verified | NPU verified |
 |-------|------------------------|---------------|--------------|
-| **OPT** | LayerNorm + learned positional embedding + ReLU FFN | OPT-125M | OPT-125M |
-| **Qwen2** | RMSNorm + RoPE + Gated MLP (SwiGLU) + Q/K bias | Qwen2.5-0.5B | Qwen2.5-{0.5B, 1.5B, 3B} |
-| **Qwen3** | Qwen2 + QK LayerNorm + GQA | Qwen3-0.6B | Qwen3-{0.6B, 1.7B, 4B} |
-| **Qwen3-MoE** | Qwen3 + MoE router (softmax → top-k → normalize, HF-aligned) | (unit tests) | (unit tests) |
-| **Llama** | Classic architecture + tie_word_embeddings | (unit tests) | (unit tests) |
-| **Mistral** | Llama + Sliding Window Attention | (unit tests) | (unit tests) |
+| **Qwen3** | RMSNorm + RoPE + SwiGLU + QK LayerNorm + GQA | Qwen3-0.6B | Qwen3-{0.6B, 1.7B, 4B} |
+| **Qwen3-MoE** | Qwen3 + sparse MoE router (softmax → top-k → normalize, HF-aligned) | (unit tests) | (unit tests) |
 
 ## Running Tests
 
