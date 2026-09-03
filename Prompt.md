@@ -45,12 +45,13 @@ Engine (CUDA Stream) — 模型 forward + 采样
 
 ```bash
 minisgl/engine：  实现 执行引擎，KV 缓存管理， 分布式通信 模块
-minisgl/models：  实现 模型架构，神经网络层，注意力后端，分词/解码 worker
+minisgl/models：  实现 模型架构，神经网络层，注意力后端
 minisgl/scheduler：调度核心， Prefill & Decode
-minisgl/sampling: 实现 采样策略
+minisgl/sampling.py: 实现 采样策略
 minisgl/server:   API 服务 + 启动
 minisgl/utils：   工具集（权重加载，日志，device 帮助函数）
 minisgl/config.py: 参数配置模块
+minisgl/tokenizer.py: 分词/解码 worker（HF tokenizer，进程内调用）
 ```
 ---
 
@@ -169,7 +170,7 @@ class SamplingParams:
   - `ColumnParallelLinear`: 沿 hidden_dim 切分（weight/bias 都分片；lm_head 显式 gather output）
   - `RowParallelLinear`: 沿 input_dim 切分（all-reduce output）
   - `VocabParallelEmbedding`: 沿 vocab_dim 切分
-- **PyNCCL**: 用 Python 封装的 NCCL 通信原语（all-reduce, all-gather, broadcast）；非分布式时为 no-op
+- **Collectives**: NCCL/HCCL 双后端通信原语（all-reduce, all-gather, broadcast，位于 `minisgl/engine/collectives.py`）；非分布式时为 no-op
 
 ### CUDA Graph 优化
 - 对 decode 阶段的每种 batch size（1, 2, ..., max_cuda_graph_bs）预先捕获 CUDA Graph

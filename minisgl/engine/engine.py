@@ -8,18 +8,19 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from minisgl.config import ModelArgs, ServerArgs
+    from minisgl.models.attention.metadata import AttentionMetadata
     from minisgl.scheduler.batch import Batch, Req
 
 __all__ = ["Engine"]
 import torch
 
 from minisgl.engine.batch_context import BatchContext
-from minisgl.engine.kvcache.pool import BaseCacheHandle, KVCachePool
+from minisgl.engine.graph import GraphRunner
+from minisgl.engine.kvcache.pool import KVCachePool
 from minisgl.models.attention.dispatcher import AttentionBackend
 from minisgl.models.attention.layer import BaseAttention
-from minisgl.models.attention.metadata import AttentionMetadata
 from minisgl.models.layers.rope import RotaryEmbedding
-from minisgl.sampling.sampler import Sampler
+from minisgl.sampling import Sampler
 from minisgl.utils.device import (
     get_device,
     get_device_type,
@@ -73,7 +74,8 @@ def _resolve_dtype(dtype_str: str, model_path: str, device_type: str) -> torch.d
 class Engine:
     """Core inference engine.
 
-    Holds the model, KV cache pool, execution graphs, and runs forward + sampling.
+    Holds the model, KV cache pool, and runs forward + sampling. Decode
+    optionally runs on captured execution graphs (see GraphRunner).
     Supports CUDA, NPU (Ascend), and CPU devices.
     Supports context manager protocol for resource cleanup.
     """
@@ -130,20 +132,13 @@ class Engine:
 
         self.sampler = Sampler()
 
-        self._graphs: dict[int, object] = {}
-        self._graph_inputs: dict[int, dict] = {}
-        self._graph_outputs: dict[int, torch.Tensor] = {}
-        # Trash page reserved from the pool for graph padding rows (set when
-        # graphs are captured); padding-row KV writes land here.
-        self._graph_pad_handle: BaseCacheHandle | None = None
-        self._graph_pad_page_id = 0
-        self._graph_pad_loc = 0
+        self.graph_runner: GraphRunner | None = None
         if (
             server_args.cuda_graph_bs
             and server_args.cuda_graph_bs > 0
             and self.device.type in ("cuda", "npu")
         ):
-            self._capture_graphs()
+            self.graph_runner = GraphRunner(self)
 
         logger.info(
             "Engine initialized on rank %d (device=%s)", tp_rank, self._device_type
@@ -157,9 +152,8 @@ class Engine:
 
     def cleanup(self) -> None:
         """Release accelerator resources."""
-        self._graphs.clear()
-        self._graph_inputs.clear()
-        self._graph_outputs.clear()
+        if self.graph_runner is not None:
+            self.graph_runner.clear()
         # The per-layer k_cache/v_cache references are views into the pool
         # buffer; drop them too or the pool's memory stays referenced and
         # cannot be released. The graph pad handle is released together with
@@ -314,42 +308,16 @@ class Engine:
                 )
 
         # Decode: try execution graph first, fall back to eager
-        bs = len(batch.reqs)
-        graph = self._find_graph(bs)
-        if graph is not None:
-            graph_bs, ins, outs = graph
-            meta = ins["attn_meta"]
-            with torch.inference_mode():
-                ins["input_ids"][:bs].copy_(batch.input_ids)
-                ins["positions"][:bs].copy_(batch.positions)
-                meta.write_loc[:bs].copy_(batch.attn_meta.write_loc)
-                meta.cache_seqlens[:bs].copy_(batch.attn_meta.cache_seqlens)
-                meta.block_table[:bs].copy_(batch.attn_meta.block_table)
-                meta.req_to_token[:bs].copy_(batch.attn_meta.req_to_token)
-                # Padding rows point at the reserved trash page so their KV
-                # writes and reads never touch real requests' pages.
-                if bs < graph_bs:
-                    meta.write_loc[bs:].fill_(self._graph_pad_loc)
-                    meta.cache_seqlens[bs:].fill_(1)
-                    meta.block_table[bs:].fill_(self._graph_pad_page_id)
-                    meta.req_to_token[bs:].fill_(self._graph_pad_loc)
-                self._graphs[graph_bs].replay()
-                # Clone: outs is a static buffer overwritten by the next replay.
-                return outs[:bs].clone()
-        else:
-            with torch.inference_mode():
-                return self._run_model(
-                    batch.input_ids,
-                    batch.positions,
-                    batch.attn_meta,
-                )
-
-    def _find_graph(self, batch_size: int) -> tuple | None:
-        """Find an execution graph large enough for the given batch size."""
-        for bs in sorted(self._graphs.keys()):
-            if bs >= batch_size:
-                return (bs, self._graph_inputs[bs], self._graph_outputs[bs])
-        return None
+        if self.graph_runner is not None:
+            logits = self.graph_runner.replay(batch)
+            if logits is not None:
+                return logits
+        with torch.inference_mode():
+            return self._run_model(
+                batch.input_ids,
+                batch.positions,
+                batch.attn_meta,
+            )
 
     def sample(self, logits: torch.Tensor, batch: Batch) -> list[int]:
         """Sample next tokens from logits.
@@ -393,117 +361,3 @@ class Engine:
                 token_ids[idx] = tokens[j]
 
         return token_ids
-
-    def _capture_graphs(self) -> None:
-        """Capture execution graphs for decode phase (CUDA or NPU)."""
-        if self.device.type not in ("cuda", "npu"):
-            logger.info("No accelerator available, skipping graph capture")
-            return
-
-        max_bs = min(self.server_args.cuda_graph_bs, self.server_args.max_running_req)
-        batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-        batch_sizes = [bs for bs in batch_sizes if bs <= max_bs]
-
-        # Reserve one trash page from the pool: padding rows of padded graph
-        # batches write/read KV into this page instead of polluting real
-        # requests. Released together with the pool at cleanup.
-        try:
-            self._graph_pad_handle = self.kv_cache_pool.alloc(1)
-        except RuntimeError as e:
-            logger.warning(
-                "Cannot reserve a pad page for graphs (%s); skipping capture", e
-            )
-            return
-        self._graph_pad_page_id = self._graph_pad_handle.page_ids[0]
-        self._graph_pad_loc = self._graph_pad_page_id * self.server_args.page_size
-
-        logger.info(
-            "Capturing %s graphs for batch sizes: %s",
-            self._device_type.upper(),
-            batch_sizes,
-        )
-
-        for bs in batch_sizes:
-            self._capture_graph_safe(bs)
-
-    def _capture_graph_safe(self, batch_size: int) -> None:
-        """Capture an execution graph, logging but not raising on failure.
-
-        On failure the engine simply falls back to eager execution for this
-        batch size (decode works without graphs, just slower).
-        """
-        try:
-            self._capture_graph(batch_size)
-        except RuntimeError as e:
-            logger.warning(
-                "Failed to capture graph for bs=%d: %s. "
-                "Falling back to eager execution for this batch size.",
-                batch_size,
-                e,
-            )
-
-    def _capture_graph(self, batch_size: int) -> None:
-        """Capture a single execution graph for a given batch size.
-
-        Supports both CUDA graphs and NPU graphs (via torch.npu). Static
-        input buffers mirror the real decode metadata produced by
-        DecodeManager (same shapes/dtypes), so replay only needs copy_
-        into these buffers. All entries point at the trash pad page.
-        """
-        device = self.device
-        args = self.server_args
-        max_blocks = (args.max_seq_len + args.page_size - 1) // args.page_size
-        pad_page = self._graph_pad_page_id
-        pad_loc = self._graph_pad_loc
-
-        input_ids = torch.ones(batch_size, 1, dtype=torch.long, device=device)
-        positions = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
-        write_loc = torch.full((batch_size,), pad_loc, dtype=torch.int32, device=device)
-        cache_seqlens = torch.ones(batch_size, dtype=torch.int32, device=device)
-        block_table = torch.full(
-            (batch_size, max_blocks), pad_page, dtype=torch.int32, device=device
-        )
-        req_to_token = torch.full(
-            (batch_size, args.max_seq_len), pad_loc, dtype=torch.int32, device=device
-        )
-        # One resident metadata object wrapping the static buffers: the
-        # captured graph reads through it, and replay only copy_()s new
-        # values into the same buffers (the object itself never changes).
-        attn_meta = AttentionMetadata(
-            forward_mode="decode",
-            write_loc=write_loc,
-            block_table=block_table,
-            req_to_token=req_to_token,
-            cache_seqlens=cache_seqlens,
-            # Static Python int: keeps the captured graph free of .item()
-            # host syncs in the PyTorch attention backend.
-            max_seqlen=args.max_seq_len,
-        )
-
-        def run_decode() -> torch.Tensor:
-            return self._run_model(input_ids, positions, attn_meta)
-
-        with torch.inference_mode():
-            # Warmup
-            for _ in range(3):
-                run_decode()
-
-            if self._device_type == "npu":
-                import os
-
-                os.environ.setdefault("TASK_QUEUE_ENABLE", "1")
-                graph = torch.npu.NPUGraph()
-                with torch.npu.graph(graph):
-                    output = run_decode()
-            else:
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph):
-                    output = run_decode()
-
-        self._graphs[batch_size] = graph
-        self._graph_inputs[batch_size] = {
-            "input_ids": input_ids,
-            "positions": positions,
-            "attn_meta": attn_meta,
-        }
-        self._graph_outputs[batch_size] = output

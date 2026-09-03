@@ -131,7 +131,7 @@ class TestAttentionBackend(unittest.TestCase):
 class TestSampler(unittest.TestCase):
     def test_greedy_sampling(self):
         from minisgl.config import SamplingParams
-        from minisgl.sampling.sampler import Sampler
+        from minisgl.sampling import Sampler
 
         sampler = Sampler()
         logits = torch.randn(4, 1000)  # 4 requests, 1000 vocab
@@ -144,7 +144,7 @@ class TestSampler(unittest.TestCase):
 
     def test_temperature_sampling(self):
         from minisgl.config import SamplingParams
-        from minisgl.sampling.sampler import Sampler
+        from minisgl.sampling import Sampler
 
         sampler = Sampler()
         logits = torch.randn(4, 1000)
@@ -153,7 +153,7 @@ class TestSampler(unittest.TestCase):
         self.assertEqual(tokens.shape, (4,))
 
     def test_top_k_top_p(self):
-        from minisgl.sampling.sampler import _apply_top_k, _apply_top_p
+        from minisgl.sampling import _apply_top_k, _apply_top_p
 
         logits = torch.randn(1, 1000)
         # Top-k: only top 10 should be > -inf
@@ -368,14 +368,14 @@ class TestSchedulerBatch(unittest.TestCase):
 # ── Test Distributed ──
 class TestDistributed(unittest.TestCase):
     def test_all_reduce_noop(self):
-        from minisgl.engine.distributed.collectives import all_reduce
+        from minisgl.engine.collectives import all_reduce
 
         x = torch.randn(10)
         y = all_reduce(x)
         self.assertTrue(torch.equal(x, y))  # no-op when not distributed
 
     def test_all_reduce_invalid_op_raises(self):
-        from minisgl.engine.distributed.collectives import all_reduce
+        from minisgl.engine.collectives import all_reduce
 
         with self.assertRaises(ValueError):
             all_reduce(torch.randn(4), op="avg")
@@ -1638,7 +1638,7 @@ class TestEOSNormalization(unittest.TestCase):
 class TestSamplerEdgeCases(unittest.TestCase):
     def test_single_token_batch(self):
         from minisgl.config import SamplingParams
-        from minisgl.sampling.sampler import Sampler
+        from minisgl.sampling import Sampler
 
         sampler = Sampler()
         logits = torch.randn(1, 100)
@@ -1648,7 +1648,7 @@ class TestSamplerEdgeCases(unittest.TestCase):
         self.assertEqual(tokens[0].item(), logits.argmax(dim=-1)[0].item())
 
     def test_top_k_equals_vocab(self):
-        from minisgl.sampling.sampler import _apply_top_k
+        from minisgl.sampling import _apply_top_k
 
         logits = torch.randn(1, 50)
         filtered = _apply_top_k(logits.clone(), 50)
@@ -1656,7 +1656,7 @@ class TestSamplerEdgeCases(unittest.TestCase):
 
     def test_very_low_temperature(self):
         from minisgl.config import SamplingParams
-        from minisgl.sampling.sampler import Sampler
+        from minisgl.sampling import Sampler
 
         sampler = Sampler()
         logits = torch.randn(4, 100)
@@ -1671,7 +1671,7 @@ class TestFrontendManager(unittest.TestCase):
     @staticmethod
     def _make_frontend(scheduler):
         from minisgl.config import ServerArgs
-        from minisgl.server.api import FrontendManager
+        from minisgl.server.manager import FrontendManager
 
         args = ServerArgs(model_path="/tmp/test")
         return FrontendManager(args, scheduler, None)
@@ -1763,7 +1763,7 @@ class TestFrontendManager(unittest.TestCase):
 # ── Test Incremental Detokenizer ──
 class TestIncrementalDetokenizer(unittest.TestCase):
     def test_multibyte_char_split_across_tokens(self):
-        from minisgl.server.api import IncrementalDetokenizer
+        from minisgl.server.manager import IncrementalDetokenizer
 
         class MockTokenizer:
             # Byte-level style: tokens 1/2 are the two halves of "中"; decoding
@@ -1779,7 +1779,7 @@ class TestIncrementalDetokenizer(unittest.TestCase):
         self.assertNotIn("\ufffd", "".join(pieces))
 
     def test_ascii_stream(self):
-        from minisgl.server.api import IncrementalDetokenizer
+        from minisgl.server.manager import IncrementalDetokenizer
 
         class MockTokenizer:
             def decode(self, ids, skip_special_tokens=True):

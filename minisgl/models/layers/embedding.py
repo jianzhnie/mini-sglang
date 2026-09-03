@@ -39,7 +39,7 @@ class VocabParallelEmbedding(nn.Module):
         out = F.embedding(safe_ids, self.weight)
         out = out * mask.unsqueeze(-1).to(out.dtype)
         if is_distributed():
-            from minisgl.engine.distributed.collectives import all_reduce
+            from minisgl.engine.collectives import all_reduce
 
             out = all_reduce(out)
         return out

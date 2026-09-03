@@ -52,15 +52,15 @@ minisgl/
 ├── cli.py               # CLI 入口（--shell / --port / --tp-size）
 ├── __main__.py          # `python -m minisgl` 入口（调 cli.main）
 ├── engine/
-│   ├── engine.py        # 推理引擎：模型加载、forward、CUDA Graph
+│   ├── engine.py        # 推理引擎：模型加载、forward、采样
+│   ├── graph.py         # GraphRunner：CUDA/NPU Graph 捕获与回放（decode 加速）
 │   ├── batch_context.py # BatchContext：批次张量管理
 │   ├── llm.py           # 高层 LLM API（离线推理）
-│   ├── kvcache/
-│   │   ├── pool.py      # KV Cache 页式内存池
-│   │   ├── radix.py     # Radix Tree 前缀共享缓存
-│   │   └── naive.py     # 简化缓存（无前缀共享、不保留页）
-│   └── distributed/
-│       └── collectives.py # NCCL/HCCL 双后端通信原语封装
+│   ├── collectives.py   # NCCL/HCCL 双后端通信原语封装
+│   └── kvcache/
+│       ├── pool.py      # KV Cache 页式内存池
+│       ├── radix.py     # Radix Tree 前缀共享缓存
+│       └── naive.py     # 简化缓存（无前缀共享、不保留页）
 ├── models/
 │   ├── base.py          # 共享基类：GatedMLP, RMSNormDecoderLayer, RMSNormForCausalLM
 │   ├── opt.py           # OPT 模型（LayerNorm + 可学习位置编码 + ReLU FFN）
@@ -87,10 +87,10 @@ minisgl/
 │   ├── prefill.py       # PrefillManager：pending 队列 + 令牌预算
 │   ├── decode.py        # DecodeManager：running 队列管理
 │   └── batch.py         # Req / Batch / OutputToken 数据结构
-├── sampling/
-│   └── sampler.py       # 采样器：greedy / top-k / top-p / temperature
+├── sampling.py          # 采样器：greedy / top-k / top-p / temperature
 ├── server/
-│   └── api.py           # FastAPI 服务：SSE 流式 + OpenAI 兼容端点
+│   ├── api.py           # FastAPI 服务：SSE 流式 + OpenAI 兼容端点
+│   └── manager.py       # FrontendManager：请求生命周期 + 增量 detokenize
 └── utils/
     ├── device.py         # 设备管理（CUDA/NPU/CPU）+ 分布式初始化（NCCL/HCCL）
     ├── logger.py         # 统一日志
