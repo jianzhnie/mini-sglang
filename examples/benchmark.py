@@ -19,19 +19,28 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-MODELS_ROOT = "/home/jianzhnie/llmtuner/hfhub/models"
-
-
 def _find_model(*names: str) -> str:
+    """Locate a model by name under common local roots (env var first)."""
     env_root = os.environ.get("MINISGL_MODELS", "")
     roots = [
-        r for r in [env_root, MODELS_ROOT, str(Path.home() / "hfhub" / "models")] if r
+        r
+        for r in [
+            env_root,
+            str(Path.home() / ".cache" / "huggingface" / "hub"),
+            str(Path.home() / "hfhub" / "models"),
+        ]
+        if r
     ]
     for name in names:
         for root in roots:
-            p = Path(root) / name
-            if p.is_dir() and (p / "config.json").exists():
-                return str(p)
+            # name may be a plain "org/model" (HF hub cache layout) or an
+            # absolute path already.
+            candidates = [Path(name), Path(root) / name]
+            if "/" in name:
+                candidates.append(Path(root) / f"models--{name.replace('/', '--')}")
+            for p in candidates:
+                if p.is_dir() and (p / "config.json").exists():
+                    return str(p)
     return ""
 
 
@@ -53,16 +62,28 @@ def benchmark_prefill(engine, scheduler_cls, server_args, tokenizer, input_lengt
     for input_len in input_lengths:
         input_ids = list(range(1, input_len + 1))
         sampling = SamplingParams(temperature=0.0, max_tokens=1)
-        scheduler = scheduler_cls(server_args, engine)
-        scheduler.add_request(input_ids, sampling)
 
-        start = time.perf_counter()
-        while not scheduler.is_idle():
-            scheduler.step()
-        elapsed = time.perf_counter() - start
+        # Warmup: the first scheduler/forward after weight load pays cold-start
+        # (page-table setup, allocator warm-up). Drop it from the measurement.
+        warmup = scheduler_cls(server_args, engine)
+        warmup.add_request(list(input_ids), sampling)
+        while not warmup.is_idle():
+            warmup.step()
 
-        ttft_ms = elapsed * 1000
-        prefill_tps = input_len / elapsed
+        # Repeat to damp scheduler-noise; report the best (fastest) run, which
+        # best reflects steady-state prefill throughput.
+        best = float("inf")
+        for _ in range(3):
+            scheduler = scheduler_cls(server_args, engine)
+            scheduler.add_request(list(input_ids), sampling)
+            start = time.perf_counter()
+            while not scheduler.is_idle():
+                scheduler.step()
+            elapsed = time.perf_counter() - start
+            best = min(best, elapsed)
+
+        ttft_ms = best * 1000
+        prefill_tps = input_len / best
         print(f"  {input_len:<12}{ttft_ms:<12.1f}{prefill_tps:<15.0f}")
 
 
@@ -81,18 +102,26 @@ def benchmark_decode_throughput(
     print(f"  {'─' * 50}")
 
     for batch_size in batch_sizes:
-        scheduler = scheduler_cls(server_args, engine)
         sampling = SamplingParams(temperature=0.0, max_tokens=decode_tokens)
+        input_ids = list(range(1, 17))
 
+        # Warmup with the same shape so cold-start does not skew the numbers.
+        warmup = scheduler_cls(server_args, engine)
         for _ in range(batch_size):
-            input_ids = list(range(1, 17))
-            scheduler.add_request(input_ids, sampling)
+            warmup.add_request(list(input_ids), sampling)
+        while not warmup.is_idle():
+            warmup.step()
+
+        scheduler = scheduler_cls(server_args, engine)
+        for _ in range(batch_size):
+            scheduler.add_request(list(input_ids), sampling)
 
         total_generated = 0
         start = time.perf_counter()
         while not scheduler.is_idle():
             results = scheduler.step()
-            total_generated += len(results)
+            # Count real generated tokens only (aborted requests carry no token).
+            total_generated += sum(1 for r in results if r.finish_reason != "abort")
         elapsed = time.perf_counter() - start
 
         total_tps = total_generated / elapsed if elapsed > 0 else 0
@@ -114,22 +143,25 @@ def benchmark_e2e(engine, scheduler_cls, server_args, tokenizer):
     ]
 
     decode_tokens = 30
-
-    print("\n── End-to-End Generation ──")
-    scheduler = scheduler_cls(server_args, engine)
     sampling = SamplingParams(temperature=0.0, max_tokens=decode_tokens)
 
-    for prompt in prompts:
-        input_ids = tokenizer.encode(prompt)
-        scheduler.add_request(input_ids, sampling)
+    def _run() -> tuple[int, float]:
+        scheduler = scheduler_cls(server_args, engine)
+        for prompt in prompts:
+            scheduler.add_request(tokenizer.encode(prompt), sampling)
+        total_generated = 0
+        start = time.perf_counter()
+        while not scheduler.is_idle():
+            results = scheduler.step()
+            total_generated += sum(1 for r in results if r.finish_reason != "abort")
+        return total_generated, time.perf_counter() - start
 
+    print("\n── End-to-End Generation ──")
     total_input = sum(len(tokenizer.encode(p)) for p in prompts)
-    total_generated = 0
-    start = time.perf_counter()
-    while not scheduler.is_idle():
-        results = scheduler.step()
-        total_generated += len(results)
-    elapsed = time.perf_counter() - start
+
+    # Warmup (discard), then measure.
+    _run()
+    total_generated, elapsed = _run()
 
     print(f"  Prompts: {len(prompts)}")
     print(f"  Total input tokens: {total_input}")

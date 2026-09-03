@@ -219,7 +219,13 @@ class Scheduler:
         return results
 
     def is_idle(self) -> bool:
+        # A request rejected at add time (prompt too long, etc.) lands in
+        # self._aborted and is only surfaced by a step() call. The event loop
+        # sleeps while is_idle() is true, so count pending abort results as
+        # non-idle: otherwise a rejected request would never be reported and
+        # the caller would block until timeout.
         return (
-            len(self.prefill_manager.pending) == 0
+            not self._aborted
+            and len(self.prefill_manager.pending) == 0
             and len(self.prefill_manager.running) == 0
         )
