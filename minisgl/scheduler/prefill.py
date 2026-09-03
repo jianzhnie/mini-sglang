@@ -56,14 +56,17 @@ class PrefillManager:
             ):
                 req = self.pending[0]
 
-                # Check if total tokens would exceed budget
-                uncached = req.uncached_len
-                if total_tokens + uncached > self.token_budget and scheduled:
-                    break
-
-                # Try prefix matching (may reduce pages needed via cache sharing)
+                # Try prefix matching (may reduce pages needed via cache sharing).
                 matched_len, shared_pages = self.radix_cache.match_prefix(req.input_ids)
                 req.cached_len = matched_len
+                # Tokens this request will actually forward this prefill step:
+                # its uncached suffix (prefix KV is read from the shared pages).
+                uncached = req.uncached_len
+
+                if total_tokens + uncached > self.token_budget and scheduled:
+                    # Advancing this request would blow the per-step budget;
+                    # stop scheduling and leave it pending for a later step.
+                    break
 
                 new_pages = self._pages_needed(req, matched_len)
 
@@ -81,11 +84,34 @@ class PrefillManager:
                     self.aborted.append(req)
                     continue
 
+                # NOTE: the shared prefix pages this request matched are owned
+                # by the radix tree, but the request has not claimed a
+                # reference on them yet (insert() below does that). If the pool
+                # is short and eviction runs now, those just-matched pages can
+                # be detached (they are ref_count == 0), returned to the free
+                # list, and then handed right back to this same request as
+                # "fresh" pages by alloc() — producing a duplicate page in the
+                # request's page table (its own prefix KV collides with its new
+                # writes). To close that race, evict first and RE-MATCH against
+                # the surviving tree: re-match never reports a page that is no
+                # longer cached, so the final shared pages are guaranteed to
+                # still be held by the tree (and thus never in the free list).
                 if self.pool.free_count() < new_pages:
-                    # Try eviction
-                    self.radix_cache.evict(new_pages - self.pool.free_count())
-                    if self.pool.free_count() < new_pages:
-                        break
+                    shortfall = new_pages - self.pool.free_count()
+                    self.radix_cache.evict(shortfall)
+                    # Re-match after eviction so shared_pages reflect the tree
+                    # that is actually left.
+                    matched_len, shared_pages = self.radix_cache.match_prefix(
+                        req.input_ids
+                    )
+                    req.cached_len = matched_len
+                    new_pages = self._pages_needed(req, matched_len)
+
+                if self.pool.free_count() < new_pages:
+                    # Even after eviction + re-match we cannot satisfy the
+                    # request this step (e.g. the cache is pinned by running
+                    # requests). Keep it pending; retry once requests finish.
+                    break
 
                 # Allocate pages for the uncached suffix only; the full page
                 # table is shared prefix pages followed by the new pages.
@@ -133,7 +159,11 @@ class PrefillManager:
             len(req.input_ids) + req.sampling_params.max_tokens,
             self.max_seq_len,
         )
-        return (upper - matched_len + self.page_size - 1) // self.page_size
+        # match_prefix guarantees matched_len <= len(input_ids) - 1 and
+        # max_tokens is clamped >= 1, so at least one token is always
+        # forwarded; max(1, ...) guards any residual underflow (e.g. a prompt
+        # already at max_seq_len) from collapsing into a 0-page allocation.
+        return max(1, (upper - matched_len + self.page_size - 1) // self.page_size)
 
     def _remove_finished_nolock(self, req: Req) -> None:
         with contextlib.suppress(ValueError):

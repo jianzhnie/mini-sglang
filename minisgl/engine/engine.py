@@ -108,6 +108,24 @@ class Engine:
 
         AttentionBackend.configure(server_args.attention_backend)
 
+        # Clamp max_seq_len to the model's trained context window. RoPE tables
+        # and the paged KV pool / req_to_token buffers are all sized off this
+        # value, and learned-position models (OPT embed_positions) hard-fail
+        # past max_position_embeddings — so an oversized --max-seq-len would
+        # only surface later as an index error mid-generation. Engine is always
+        # built before the Scheduler (which shares server_args), so clamping
+        # here propagates everywhere.
+        max_pos = model_args.max_position_embeddings
+        if max_pos and server_args.max_seq_len > max_pos:
+            logger.warning(
+                "max_seq_len=%d exceeds the model's max_position_embeddings=%d; "
+                "clamping to %d",
+                server_args.max_seq_len,
+                max_pos,
+                max_pos,
+            )
+            server_args.max_seq_len = max_pos
+
         self.model, self._model_type = self._create_model()
         self.dtype = _resolve_dtype(
             server_args.dtype, server_args.model_path, self.device.type
@@ -227,6 +245,20 @@ class Engine:
             free_mem, total_mem = mem_get_info(self.device)
             used_mem = total_mem - free_mem
             available_mem = int(total_mem * args.memory_ratio - used_mem)
+            if available_mem <= 0:
+                # The model already fills the budget (memory_ratio over-used).
+                # Silently allocating a 1-page pool turns every later request
+                # into "needs more pages than the pool" aborts — fail loudly
+                # instead so the operator can raise memory_ratio or use a
+                # smaller model.
+                logger.error(
+                    "No memory left for KV cache: total=%d used=%d (ratio=%.2f). "
+                    "Lower the model size or free GPU memory.",
+                    total_mem,
+                    used_mem,
+                    args.memory_ratio,
+                )
+                raise RuntimeError("KV cache allocation failed: no free memory")
         else:
             available_mem = _CPU_KV_CACHE_BYTES
 

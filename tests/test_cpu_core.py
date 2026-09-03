@@ -481,6 +481,22 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(params.temperature, 0.7)
         self.assertEqual(params.top_k, 50)
 
+    def test_sampling_params_clamps_invalid_values(self):
+        # max_tokens must never be < 1 (0/negative underflows page counting),
+        # and top_p must stay within [0, 1] (nucleus threshold).
+        from minisgl.config import SamplingParams
+
+        self.assertEqual(SamplingParams(max_tokens=0).max_tokens, 1)
+        self.assertEqual(SamplingParams(max_tokens=-5).max_tokens, 1)
+        self.assertEqual(SamplingParams(top_p=2.0).top_p, 1.0)
+        self.assertEqual(SamplingParams(top_p=-0.5).top_p, 1.0)
+        # temperature <= 0 is the documented greedy sentinel — left untouched.
+        self.assertEqual(SamplingParams(temperature=0.0).temperature, 0.0)
+        # Valid values pass through unchanged.
+        p = SamplingParams(max_tokens=64, top_p=0.9)
+        self.assertEqual(p.max_tokens, 64)
+        self.assertEqual(p.top_p, 0.9)
+
 
 # ── Test Tokenizer Worker ──
 class TestTokenizerWorker(unittest.TestCase):
@@ -1330,6 +1346,100 @@ class TestPrefillManager(unittest.TestCase):
         pm = PrefillManager(args, pool, cache)
         self.assertIsNone(pm.schedule_prefill())
 
+    def test_prefix_match_then_eviction_no_duplicate_pages(self):
+        """Regression: sharing a cached prefix must not yield a duplicate page.
+
+        Prefill matches a shared prefix, then — under memory pressure — evicts
+        cache pages that turn out to be the very prefix pages just matched.
+        The evicted pages return to the free list and are handed right back to
+        the same request by alloc(), so its page table ends up with the same
+        page twice. Its own prefix KV then collides with its fresh writes
+        (silent corruption). schedule_prefill() re-matches after eviction so a
+        request only reuses pages that are provably still held by the tree.
+        """
+        from minisgl.config import SamplingParams, ServerArgs
+        from minisgl.engine.kvcache.pool import KVCachePool
+        from minisgl.engine.kvcache.radix import RadixCacheManager
+        from minisgl.scheduler.batch import Req
+        from minisgl.scheduler.prefill import PrefillManager
+
+        args = ServerArgs(
+            model_path="/tmp/test",
+            max_running_req=8,
+            max_seq_len=64,
+            page_size=4,
+        )
+        pool = KVCachePool(
+            num_layers=1,
+            num_pages=8,
+            page_size=4,
+            num_kv_heads=1,
+            head_dim=8,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+        radix = RadixCacheManager(pool, page_size=4)
+        pm = PrefillManager(args, pool, radix)
+
+        def _finish(prompt: list[int], max_tokens: int) -> None:
+            req = Req(
+                input_ids=prompt,
+                uid=0,
+                sampling_params=SamplingParams(max_tokens=max_tokens),
+            )
+            pm.add_request(req)
+            pm.schedule_prefill()
+            pm.running = [req]
+            pm.remove_finished_batch([req])
+
+        # Request A caches a 20-token prefix in the tree (5 pages: 8 - 3 free).
+        _finish(list(range(100, 120)), max_tokens=1)
+        self.assertEqual(pool.free_count(), 3)
+
+        # Tighten the pool so scheduling B requires eviction.
+        occupied = pool.alloc(2)
+        self.assertEqual(pool.free_count(), 1)
+
+        # B shares A's full prefix and wants to extend far enough that its
+        # fresh-page need exceeds the pool's free count -> eviction runs.
+        B = Req(
+            input_ids=list(range(100, 120)),
+            uid=1,
+            sampling_params=SamplingParams(max_tokens=8),
+        )
+        pm.add_request(B)
+        pm.pending.clear()
+        pm.pending.append(B)
+        batch = pm.schedule_prefill()
+
+        # The evictor may have detached B's just-matched prefix (its nodes are
+        # ref_count == 0 until insert()). That is fine and expected; what must
+        # NEVER happen is B ending up with the same page both as a "shared"
+        # prefix page and as a freshly allocated page.
+        if batch is not None:
+            handle = B.cache_handle
+            self.assertEqual(len(handle.page_ids), len(set(handle.page_ids)),
+                             "page table contains a duplicate page")
+            # Shared pages must still be owned by the tree (not in free list).
+            for shared in handle.page_ids[: handle.num_shared]:
+                self.assertNotIn(shared, pool.free_pages)
+            self.assertEqual(B.cached_len, handle.cached_len)
+        else:
+            # B stayed pending: under pressure its prefix was evicted and not
+            # enough other pages are free this step. It must schedule cleanly
+            # once the pages held by the "other running request" are released.
+            self.assertIn(B, pm.pending)
+            pool.free_pages_by_id(occupied.page_ids)  # other request finishes
+            pm.pending.clear()
+            pm.pending.append(B)
+            batch2 = pm.schedule_prefill()
+            self.assertIsNotNone(batch2)
+            handle = B.cache_handle
+            self.assertEqual(len(handle.page_ids), len(set(handle.page_ids)),
+                             "page table contains a duplicate page")
+            for shared in handle.page_ids[: handle.num_shared]:
+                self.assertNotIn(shared, pool.free_pages)
+
 
 # ── Test Shared Decoder Base Classes ──
 class TestSharedDecoder(unittest.TestCase):
@@ -1749,7 +1859,7 @@ class TestFrontendManager(unittest.TestCase):
         try:
             uid = fm.submit_request([1, 2, 3], SamplingParams())
             result_queue = fm.get_result_queue(uid)
-            chunks = list(api._stream_chat_response(uid, result_queue, "m"))
+            chunks = list(api._stream_chat_response(uid, result_queue, "m", 3))
         finally:
             api._frontend, api.REQUEST_TIMEOUT = old_frontend, old_timeout
 
@@ -1758,6 +1868,58 @@ class TestFrontendManager(unittest.TestCase):
         self.assertTrue(any('"error"' in chunk for chunk in chunks))
         self.assertEqual(scheduler.aborted, [uid])
         self.assertIsNone(fm.get_result_queue(uid))
+
+    def test_stream_finish_chunk_carries_reason_and_usage(self):
+        """OpenAI streaming contract: content chunks carry no finish_reason;
+        a separate terminal chunk carries finish_reason + usage, then [DONE]."""
+        import json
+
+        import minisgl.server.api as api
+        from minisgl.config import SamplingParams
+        from minisgl.scheduler.batch import OutputToken
+
+        scheduler = self._MockScheduler()
+        fm = self._make_frontend(scheduler)
+
+        class _FakeTokenizer:
+            def decode(self, ids, skip_special_tokens=True):
+                return "".join(chr(i) for i in ids)
+
+        fm.tokenizer = _FakeTokenizer()
+        old_frontend = api._frontend
+        api._frontend = fm
+        try:
+            uid = fm.submit_request([1, 2, 3], SamplingParams())
+            q = fm.get_result_queue(uid)
+            # Two content tokens, the last one finishing with reason "length".
+            scheduler.results.append(
+                OutputToken(uid=uid, token_id=101, finished=False, finish_reason=None)
+            )
+            scheduler.results.append(
+                OutputToken(uid=uid, token_id=102, finished=True, finish_reason="length")
+            )
+            fm.process_step()
+
+            chunks = list(api._stream_chat_response(uid, q, "model-x", prompt_tokens=3))
+        finally:
+            api._frontend = old_frontend
+
+        self.assertEqual(chunks[-1], "data: [DONE]\n\n")
+        payloads = [json.loads(c[len("data: "):]) for c in chunks[:-1]]
+        # The two content tokens land as their own delta chunks (no reason).
+        content_chunks = [p for p in payloads if p["choices"][0]["delta"].get("content")]
+        self.assertEqual(len(content_chunks), 2)
+        for p in content_chunks:
+            self.assertIsNone(p["choices"][0]["finish_reason"])
+            self.assertNotIn("usage", p)
+        # Terminal chunk: empty delta + finish_reason + usage.
+        term = payloads[-1]
+        self.assertEqual(term["choices"][0]["delta"], {})
+        self.assertEqual(term["choices"][0]["finish_reason"], "length")
+        self.assertEqual(term["usage"]["completion_tokens"], 2)
+        self.assertEqual(term["usage"]["prompt_tokens"], 3)
+        self.assertEqual(term["usage"]["total_tokens"], 5)
+        self.assertIn("created", term)
 
 
 # ── Test Incremental Detokenizer ──

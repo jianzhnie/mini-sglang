@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mini-sglang"
 version = "0.1.0"
-description = "A lightweight educational LLM inference framework (~4,300 lines)"
+description = "A lightweight educational LLM inference framework (~5,300 lines)"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
@@ -28,6 +28,7 @@ classifiers = [
 
 dependencies = [
     "torch>=2.0",
+    "transformers>=4.40",
     "fastapi>=0.100",
     "uvicorn[standard]>=0.20",
     "pydantic>=2.0",

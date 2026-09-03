@@ -10,6 +10,7 @@ __all__ = [
 import asyncio
 import json
 import queue
+import time
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException
@@ -81,10 +82,22 @@ def _error_chunk(message: str) -> str:
     return f"data: {json.dumps({'error': {'message': message}})}\n\n"
 
 
-async def _collect_all_tokens(uid: int, result_queue: queue.Queue) -> tuple[str, str]:
+def _usage(prompt_tokens: int, completion_tokens: int) -> dict:
+    """OpenAI-style token usage block."""
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
+
+
+async def _collect_all_tokens(
+    uid: int, result_queue: queue.Queue
+) -> tuple[str, str, int]:
     """Collect the full output of a non-streaming request.
 
-    Returns (text, finish_reason). Raises HTTPException on timeout or abort.
+    Returns (text, finish_reason, completion_token_count). Raises
+    HTTPException on timeout or abort.
     """
     token_ids: list[int] = []
     finish_reason = "stop"
@@ -94,6 +107,10 @@ async def _collect_all_tokens(uid: int, result_queue: queue.Queue) -> tuple[str,
         while True:
             token_id, finished, reason = result_queue.get(timeout=REQUEST_TIMEOUT)
             if reason == "abort":
+                # The scheduler refused the request up front (e.g. prompt
+                # longer than max_seq_len, or un-satisfiable KV demand). No
+                # token was ever produced; surface it as a client error rather
+                # than a misleading empty 200.
                 raise RuntimeError("Request aborted by the scheduler")
             token_ids.append(token_id)
             if finished:
@@ -106,11 +123,13 @@ async def _collect_all_tokens(uid: int, result_queue: queue.Queue) -> tuple[str,
         _frontend.scheduler.abort_request(uid)
         raise HTTPException(status_code=504, detail="Generation timed out") from None
     except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e)) from None
+        raise HTTPException(status_code=400, detail=str(e)) from None
     finally:
         _frontend.remove_result(uid)
 
-    return _frontend.tokenizer.decode(token_ids), finish_reason
+    # Re-decode the full token list at once: per-token decode would corrupt
+    # multi-byte UTF-8 characters split across tokens.
+    return _frontend.tokenizer.decode(token_ids), finish_reason, len(token_ids)
 
 
 @app.post("/v1/chat/completions")
@@ -137,18 +156,27 @@ async def chat_completions(request: ChatCompletionRequest):
 
     uid = _frontend.submit_request(input_ids, sampling_params)
     result_queue = _frontend.get_result_queue(uid)
+    if result_queue is None:
+        # The request was already aborted+cleaned up between submit and here
+        # (scheduler thread ran ahead). Fail cleanly instead of crashing on a
+        # None queue.
+        _frontend.scheduler.abort_request(uid)
+        raise HTTPException(status_code=503, detail="Request already closed")
 
     if request.stream:
         return StreamingResponse(
-            _stream_chat_response(uid, result_queue, request.model),
+            _stream_chat_response(uid, result_queue, request.model, len(input_ids)),
             media_type="text/event-stream",
         )
 
     # Collect all tokens for non-streaming (runs blocking queue.get in a thread)
-    text, finish_reason = await _collect_all_tokens(uid, result_queue)
+    text, finish_reason, completion_tokens = await _collect_all_tokens(
+        uid, result_queue
+    )
     return {
         "id": f"chatcmpl-{uid}",
         "object": "chat.completion",
+        "created": int(time.time()),
         "model": request.model,
         "choices": [
             {
@@ -157,26 +185,60 @@ async def chat_completions(request: ChatCompletionRequest):
                 "finish_reason": finish_reason,
             }
         ],
+        "usage": _usage(len(input_ids), completion_tokens),
     }
 
 
-def _stream_chat_response(uid: int, result_queue: queue.Queue, model: str):
+def _chat_content_chunk(uid: int, model: str, content: str) -> str:
+    """SSE content chunk for chat completions (no finish_reason yet)."""
+    chunk = {
+        "id": f"chatcmpl-{uid}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}],
+    }
+    return f"data: {json.dumps(chunk, ensure_ascii=True)}\n\n"
+
+
+def _finish_chunk(
+    uid: int, model: str, api: str, reason: str, prompt_tokens: int, completion_tokens: int
+) -> str:
+    """OpenAI terminal stream chunk: empty delta/text, finish_reason, usage."""
+    if api == "chat":
+        body = {
+            "id": f"chatcmpl-{uid}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {"index": 0, "delta": {}, "finish_reason": reason}
+            ],
+        }
+    else:
+        body = {
+            "id": f"cmpl-{uid}",
+            "object": "text_completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [{"index": 0, "text": "", "finish_reason": reason}],
+        }
+    # usage is only carried on the final streamed chunk (OpenAI contract).
+    body["usage"] = _usage(prompt_tokens, completion_tokens)
+    return f"data: {json.dumps(body, ensure_ascii=True)}\n\n"
+
+
+def _stream_chat_response(
+    uid: int, result_queue: queue.Queue, model: str, prompt_tokens: int
+):
     """SSE streaming generator for chat completions (sync, runs in thread pool)."""
     return _stream_response(
         uid,
         result_queue,
-        lambda content, finished, reason: {
-            "id": f"chatcmpl-{uid}",
-            "object": "chat.completion.chunk",
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"content": content},
-                    "finish_reason": reason if finished else None,
-                }
-            ],
-        },
+        "chat",
+        model,
+        prompt_tokens,
+        lambda content: _chat_content_chunk(uid, model, content),
     )
 
 
@@ -198,57 +260,85 @@ async def completions(request: CompletionRequest):
 
     uid = _frontend.submit_request(input_ids, sampling_params)
     result_queue = _frontend.get_result_queue(uid)
+    if result_queue is None:
+        # See chat_completions: the request may have been cleaned up between
+        # submit and here.
+        _frontend.scheduler.abort_request(uid)
+        raise HTTPException(status_code=503, detail="Request already closed")
 
     if request.stream:
         return StreamingResponse(
-            _stream_completion_response(uid, result_queue, request.model),
+            _stream_completion_response(uid, result_queue, request.model, len(input_ids)),
             media_type="text/event-stream",
         )
 
-    text, finish_reason = await _collect_all_tokens(uid, result_queue)
+    text, finish_reason, completion_tokens = await _collect_all_tokens(
+        uid, result_queue
+    )
     return {
         "id": f"cmpl-{uid}",
         "object": "text_completion",
+        "created": int(time.time()),
         "model": request.model,
         "choices": [{"index": 0, "text": text, "finish_reason": finish_reason}],
+        "usage": _usage(len(input_ids), completion_tokens),
     }
 
 
-def _stream_completion_response(uid: int, result_queue: queue.Queue, model: str):
+def _completion_content_chunk(uid: int, model: str, content: str) -> str:
+    """SSE content chunk for completions (no finish_reason yet)."""
+    chunk = {
+        "id": f"cmpl-{uid}",
+        "object": "text_completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "text": content, "finish_reason": None}],
+    }
+    return f"data: {json.dumps(chunk, ensure_ascii=True)}\n\n"
+
+
+def _stream_completion_response(
+    uid: int, result_queue: queue.Queue, model: str, prompt_tokens: int
+):
     """SSE streaming generator for completions (sync, runs in thread pool)."""
     return _stream_response(
         uid,
         result_queue,
-        lambda content, finished, reason: {
-            "id": f"cmpl-{uid}",
-            "object": "text_completion",
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "text": content,
-                    "finish_reason": reason if finished else None,
-                }
-            ],
-        },
+        "completion",
+        model,
+        prompt_tokens,
+        lambda content: _completion_content_chunk(uid, model, content),
     )
 
 
-def _stream_response(uid: int, result_queue: queue.Queue, make_chunk):
-    """Shared SSE streaming core; ``make_chunk`` shapes the per-API chunk dict."""
+def _stream_response(
+    uid: int, result_queue: queue.Queue, api: str, model: str, prompt_tokens: int,
+    make_content_chunk,
+):
+    """Shared SSE streaming core.
+
+    Content chunks never carry a finish_reason; the token that finishes a
+    request is followed by a separate terminal chunk holding finish_reason and
+    usage (OpenAI's streaming contract), then a final [DONE].
+    """
     detok = IncrementalDetokenizer(_frontend.tokenizer)
+    completion_tokens = 0
+    finish_reason: str | None = None
     try:
         while True:
-            token_id, finished, finish_reason = result_queue.get(
-                timeout=REQUEST_TIMEOUT
-            )
-            if finish_reason == "abort":
+            token_id, finished, reason = result_queue.get(timeout=REQUEST_TIMEOUT)
+            if reason == "abort":
                 yield _error_chunk("Request aborted by the scheduler")
                 break
-            chunk = make_chunk(detok.add_token(token_id), finished, finish_reason)
-            yield f"data: {json.dumps(chunk, ensure_ascii=True)}\n\n"
-
+            completion_tokens += 1
+            content = detok.add_token(token_id)
+            if content:
+                yield make_content_chunk(content)
             if finished:
+                finish_reason = reason
+                yield _finish_chunk(
+                    uid, model, api, finish_reason, prompt_tokens, completion_tokens
+                )
                 break
     except queue.Empty:
         logger.warning(

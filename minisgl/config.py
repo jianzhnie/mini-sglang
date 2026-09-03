@@ -16,6 +16,19 @@ class SamplingParams:
     ignore_eos: bool = False
     max_tokens: int = 1024
 
+    def __post_init__(self) -> None:
+        # Clamp instead of raising: these arrive from an HTTP API, so a bad
+        # value should degrade to a safe default rather than 500 the request.
+        # max_tokens must be >= 1: the scheduler allocates pages for the
+        # prompt + max_tokens headroom, and a 0/negative value can underflow
+        # _pages_needed into a 0-page allocation.
+        if self.max_tokens < 1:
+            self.max_tokens = 1
+        if self.top_p < 0.0 or self.top_p > 1.0:
+            self.top_p = 1.0
+        # temperature <= 0 is the documented "greedy" sentinel in Sampler and
+        # the engine's batched fast path keys off it; keep it as-is.
+
 
 @dataclass
 class ServerArgs:
