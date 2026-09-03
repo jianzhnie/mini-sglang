@@ -12,7 +12,6 @@ Usage:
     python examples/offline_inference.py  # auto-detect model
 """
 
-import argparse
 import os
 import sys
 import time
@@ -22,21 +21,20 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # examples/
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # root
 
 from _common import (  # noqa: E402
-    DEFAULT_MODEL_NAMES,
     banner,
     build_engine,
+    cli_main,
     drive,
     load_tokenizer,
-    resolve_model_path,
     section,
 )
+
+from minisgl.config import SamplingParams  # noqa: E402
+from minisgl.scheduler.scheduler import Scheduler  # noqa: E402
 
 
 def demo_engine_scheduler(engine, server_args, tokenizer, max_tokens):
     """Part 1: Direct Engine + Scheduler usage with batch generation."""
-    from minisgl.config import SamplingParams
-    from minisgl.scheduler.scheduler import Scheduler
-
     section("Part 1: Engine + Scheduler (Batch Generation)")
 
     prompts = [
@@ -115,9 +113,6 @@ def demo_llm_api(model_path, max_tokens):
 
 def demo_streaming(engine, server_args, tokenizer, max_tokens):
     """Part 3: Streaming generation with TTFT and throughput metrics."""
-    from minisgl.config import SamplingParams
-    from minisgl.scheduler.scheduler import Scheduler
-
     section("Part 3: Streaming Generation")
 
     prompt = "Once upon a time in a land far away,"
@@ -153,9 +148,6 @@ def demo_streaming(engine, server_args, tokenizer, max_tokens):
 
 def demo_sampling(engine, server_args, tokenizer, max_tokens):
     """Part 4: Compare sampling strategies."""
-    from minisgl.config import SamplingParams
-    from minisgl.scheduler.scheduler import Scheduler
-
     section("Part 4: Sampling Strategies")
 
     prompt = "The secret to happiness is"
@@ -209,9 +201,4 @@ def main(model_path: str):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Mini-SGLang Offline Inference")
-    parser.add_argument("--model-path", type=str, default=None)
-    args = parser.parse_args()
-
-    model_path = resolve_model_path(args.model_path, *DEFAULT_MODEL_NAMES)
-    main(model_path)
+    cli_main("Mini-SGLang Offline Inference", main)

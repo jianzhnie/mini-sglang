@@ -86,6 +86,28 @@ def resolve_model_path(
     return path
 
 
+def cli_main(
+    description: str,
+    run,
+    *names: str,
+    extra_roots: Sequence[str] = (),
+) -> None:
+    """Run an example's main from the CLI.
+
+    Owns the argparse + --model-path resolution that every model example
+    repeats, so each script's ``if __name__ == "__main__"`` is one line::
+
+        cli_main("Mini-SGLang Offline Inference", main)
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("--model-path", type=str, default=None)
+    args = parser.parse_args()
+    names = names or DEFAULT_MODEL_NAMES
+    run(resolve_model_path(args.model_path, *names, extra_roots=extra_roots))
+
+
 def default_server_args(
     model_path: str,
     *,

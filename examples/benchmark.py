@@ -15,7 +15,6 @@ Usage:
     python examples/benchmark.py --model-path /path/to/model
 """
 
-import argparse
 import os
 import sys
 import time
@@ -25,13 +24,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # examples/
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # root
 
 from _common import (  # noqa: E402
-    DEFAULT_MODEL_NAMES,
     banner,
     build_engine,
+    cli_main,
     drive,
     load_tokenizer,
-    resolve_model_path,
 )
+
+from minisgl.config import SamplingParams  # noqa: E402
+from minisgl.scheduler.scheduler import Scheduler  # noqa: E402
 
 
 def _scheduler_tokens(scheduler) -> int:
@@ -39,10 +40,8 @@ def _scheduler_tokens(scheduler) -> int:
     return sum(1 for out in drive(scheduler) if out.finish_reason != "abort")
 
 
-def benchmark_prefill(engine, scheduler_cls, server_args, tokenizer, input_lengths):
+def benchmark_prefill(engine, server_args, tokenizer, input_lengths):
     """Benchmark time-to-first-token at various input lengths."""
-    from minisgl.config import SamplingParams
-
     print("\n── Prefill Latency (Time to First Token) ──")
     print(f"  {'Input Len':<12}{'TTFT (ms)':<12}{'Prefill tok/s':<15}")
     print(f"  {'─' * 38}")
@@ -52,7 +51,7 @@ def benchmark_prefill(engine, scheduler_cls, server_args, tokenizer, input_lengt
         sampling = SamplingParams(temperature=0.0, max_tokens=1)
 
         # Warmup: drop the cold run before measuring.
-        warmup = scheduler_cls(server_args, engine)
+        warmup = Scheduler(server_args, engine)
         warmup.add_request(list(input_ids), sampling)
         for _ in drive(warmup):
             pass
@@ -61,7 +60,7 @@ def benchmark_prefill(engine, scheduler_cls, server_args, tokenizer, input_lengt
         # best reflects steady-state prefill throughput.
         best = float("inf")
         for _ in range(3):
-            scheduler = scheduler_cls(server_args, engine)
+            scheduler = Scheduler(server_args, engine)
             scheduler.add_request(list(input_ids), sampling)
             start = time.perf_counter()
             for _ in drive(scheduler):
@@ -73,12 +72,8 @@ def benchmark_prefill(engine, scheduler_cls, server_args, tokenizer, input_lengt
         print(f"  {input_len:<12}{ttft_ms:<12.1f}{prefill_tps:<15.0f}")
 
 
-def benchmark_decode_throughput(
-    engine, scheduler_cls, server_args, tokenizer, batch_sizes
-):
+def benchmark_decode_throughput(engine, server_args, tokenizer, batch_sizes):
     """Benchmark decode throughput at various batch sizes."""
-    from minisgl.config import SamplingParams
-
     decode_tokens = 20
 
     print("\n── Decode Throughput (batch generation) ──")
@@ -92,13 +87,13 @@ def benchmark_decode_throughput(
         input_ids = list(range(1, 17))
 
         # Warmup with the same shape so cold-start does not skew the numbers.
-        warmup = scheduler_cls(server_args, engine)
+        warmup = Scheduler(server_args, engine)
         for _ in range(batch_size):
             warmup.add_request(list(input_ids), sampling)
         for _ in drive(warmup):
             pass
 
-        scheduler = scheduler_cls(server_args, engine)
+        scheduler = Scheduler(server_args, engine)
         for _ in range(batch_size):
             scheduler.add_request(list(input_ids), sampling)
 
@@ -113,10 +108,8 @@ def benchmark_decode_throughput(
         )
 
 
-def benchmark_e2e(engine, scheduler_cls, server_args, tokenizer):
+def benchmark_e2e(engine, server_args, tokenizer):
     """End-to-end benchmark with realistic prompts."""
-    from minisgl.config import SamplingParams
-
     prompts = [
         "The meaning of life is",
         "Python programming language was created by",
@@ -128,7 +121,7 @@ def benchmark_e2e(engine, scheduler_cls, server_args, tokenizer):
     sampling = SamplingParams(temperature=0.0, max_tokens=decode_tokens)
 
     def _run() -> tuple[int, float]:
-        scheduler = scheduler_cls(server_args, engine)
+        scheduler = Scheduler(server_args, engine)
         for prompt in prompts:
             scheduler.add_request(tokenizer.encode(prompt), sampling)
         start = time.perf_counter()
@@ -153,8 +146,6 @@ def benchmark_e2e(engine, scheduler_cls, server_args, tokenizer):
 def main(model_path: str) -> None:
     import torch
 
-    from minisgl.scheduler.scheduler import Scheduler
-
     on_cpu = not torch.cuda.is_available()
 
     banner(
@@ -168,17 +159,12 @@ def main(model_path: str) -> None:
     input_lengths = [8, 16, 32, 64, 128] if not on_cpu else [8, 16, 32]
     batch_sizes = [1, 2, 4, 8] if not on_cpu else [1, 2, 4]
 
-    benchmark_prefill(engine, Scheduler, server_args, tokenizer, input_lengths)
-    benchmark_decode_throughput(engine, Scheduler, server_args, tokenizer, batch_sizes)
-    benchmark_e2e(engine, Scheduler, server_args, tokenizer)
+    benchmark_prefill(engine, server_args, tokenizer, input_lengths)
+    benchmark_decode_throughput(engine, server_args, tokenizer, batch_sizes)
+    benchmark_e2e(engine, server_args, tokenizer)
 
     banner("BENCHMARK COMPLETE")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Mini-SGLang Benchmark")
-    parser.add_argument("--model-path", type=str, default=None)
-    args = parser.parse_args()
-
-    model_path = resolve_model_path(args.model_path, *DEFAULT_MODEL_NAMES)
-    main(model_path)
+    cli_main("Mini-SGLang Benchmark", main)

@@ -15,7 +15,6 @@ Then test:
       -d '{"prompt":"The capital of France is","max_tokens":10,"stream":false}'
 """
 
-import argparse
 import json
 import os
 import sys
@@ -29,10 +28,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # examples/
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # root
 
 from _common import (  # noqa: E402
-    DEFAULT_MODEL_NAMES,
     banner,
     build_engine,
-    resolve_model_path,
+    cli_main,
 )
 
 HOST, PORT = "127.0.0.1", 8765
@@ -94,14 +92,8 @@ def start_server(model_path: str) -> None:
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
 
 
-def main() -> None:
+def main(model_path: str) -> None:
     import multiprocessing
-
-    parser = argparse.ArgumentParser(description="Mini-SGLang Server Demo")
-    parser.add_argument("--model-path", type=str, default=None)
-    cli_args = parser.parse_args()
-
-    model_path = resolve_model_path(cli_args.model_path, *DEFAULT_MODEL_NAMES)
 
     banner(
         "Mini-SGLang OpenAI API Server Demo",
@@ -170,4 +162,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    cli_main("Mini-SGLang Server Demo", main)
