@@ -245,8 +245,10 @@ Mini-SGLang supports the **Qwen3 family** of dense decoder-only transformers.
 ## Running Tests
 
 ```bash
-# Unit tests (99 tests, CPU-only, ~15s)
-python tests/test_cpu_core.py
+# Unit tests (99 tests, CPU-only, ~15s) — run with pytest or directly
+python -m pytest tests
+# or run one file directly:
+python tests/test_scheduler.py
 
 # Example smoke tests (cpu_demo needs no model; model cases take local model
 # paths via MINISGL_TEST_MODELS and are skipped when unset)
@@ -255,7 +257,7 @@ python tests/test_examples.py
 # NPU environment tests (requires Docker + Ascend hardware)
 docker run --privileged -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
   -v $(pwd):/workspace -w /workspace torchtitan-npu:cann9.0.0-torch2.12.0 \
-  python tests/test_cpu_core.py
+  python -m pytest tests
 ```
 
 ### Test Coverage
