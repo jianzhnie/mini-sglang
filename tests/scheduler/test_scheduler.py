@@ -515,6 +515,77 @@ class TestEndToEndScheduler(unittest.TestCase):
         )
         # Nothing left running: the errored request never reached decode.
         self.assertTrue(scheduler.is_idle())
+        # The failed request's never-written KV pages are returned to the pool
+        # (no leak from routing it through normal remove()).
+        self.assertEqual(
+            scheduler.pool.free_count(),
+            scheduler.pool.num_pages,
+            msg="prefill-failure must not leak KV pages",
+        )
+
+    def test_prefill_error_rolls_back_radix_prefix(self):
+        """A prefill failure must not leave a stale (never-written) prefix.
+
+        Regression: prefill attaches the prompt to the radix tree BEFORE the
+        forward runs. If the forward raises, routing the request through the
+        normal remove() path leaves nodes pointing at freshly-allocated NaN
+        pages; a later request with the same prefix would match them and read
+        garbage KV, silently corrupting its output.
+        """
+        from minisgl.config import SamplingParams
+
+        scheduler = self._make_engine_scheduler()
+        real_forward = scheduler.engine.forward
+
+        def boom(batch):
+            if batch.phase == "prefill":
+                raise RuntimeError("boom")
+            return real_forward(batch)
+
+        # Poison prefix [1..8] with a request whose prefill dies.
+        scheduler.engine.forward = boom
+        scheduler.add_request(
+            list(range(1, 9)), SamplingParams(temperature=0.0, max_tokens=3)
+        )
+        scheduler.step()
+        scheduler.engine.forward = real_forward
+
+        # The tree must not claim any of the prefix as cached.
+        matched, shared = scheduler.cache_manager.match_prefix(list(range(1, 9)))
+        self.assertEqual(matched, 0, msg="stale prefix must be rolled back")
+        self.assertEqual(shared, [])
+
+        # A healthy request with that prefix must produce the same output as it
+        # would on a pristine pool.
+        scheduler.add_request(
+            list(range(1, 9)), SamplingParams(temperature=0.0, max_tokens=3)
+        )
+        got = []
+        for _ in range(200):
+            for out in scheduler.step():
+                if out.finish_reason not in ("abort", "error"):
+                    got.append(out.token_id)
+            if scheduler.is_idle():
+                break
+        self.assertEqual(len(got), 3)
+
+        # No leak from the poisoned request: a pristine run of the same healthy
+        # request ends with the same tree state (one cached sequence), so the
+        # free counts must match exactly. A rollback leak would leave the
+        # poisoned run short.
+        healthy = self._make_engine_scheduler()
+        healthy.add_request(
+            list(range(1, 9)), SamplingParams(temperature=0.0, max_tokens=3)
+        )
+        for _ in range(200):
+            if healthy.is_idle():
+                break
+            healthy.step()
+        self.assertEqual(
+            scheduler.pool.free_count(),
+            healthy.pool.free_count(),
+            msg="poisoned-prefix run must leave the same pool state as a healthy run",
+        )
 
     def test_sampling_error_isolates_batch(self):
         """Failures in sample() are isolated the same way as forward()."""

@@ -38,3 +38,7 @@ class NaiveCacheManager:
     def remove(self, input_ids: list[int], handle: BaseCacheHandle) -> None:
         """Free the request's pages immediately (no sharing, no caching)."""
         self.pool.free(handle)
+
+    def rollback_insert(self, input_ids: list[int], handle: BaseCacheHandle) -> None:
+        """No tree to roll back; free the never-written pages like remove()."""
+        self.pool.free(handle)

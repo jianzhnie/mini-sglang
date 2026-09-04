@@ -174,7 +174,29 @@ class PrefillManager:
             self.radix_cache.remove(req.input_ids, req.cache_handle)
             req.cache_handle = None
 
+    def _remove_failed_nolock(self, req: Req) -> None:
+        """Clean up a request whose PREFILL forward failed.
+
+        Distinct from ``_remove_finished_nolock``: a prefill that died mid-
+        forward had its prompt inserted into the radix tree but its KV was never
+        written, so ``radix.remove`` (which assumes written KV and extends the
+        tree with the sequence) is wrong. We roll the insert back instead —
+        detaching the never-written nodes and freeing their pages — so no later
+        request can match a garbage prefix.
+        """
+        with contextlib.suppress(ValueError):
+            self.running.remove(req)
+        if req.cache_handle:
+            self.radix_cache.rollback_insert(req.input_ids, req.cache_handle)
+            req.cache_handle = None
+
     def remove_finished_batch(self, reqs: list[Req]) -> None:
         with self._lock:
             for req in reqs:
                 self._remove_finished_nolock(req)
+
+    def remove_failed_prefill_batch(self, reqs: list[Req]) -> None:
+        """Remove requests whose prefill forward raised (rolls back the tree)."""
+        with self._lock:
+            for req in reqs:
+                self._remove_failed_nolock(req)

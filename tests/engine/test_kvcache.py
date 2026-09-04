@@ -275,7 +275,64 @@ class TestRadixCacheEvictRemove(unittest.TestCase):
         evicted = radix.evict(1)
         self.assertEqual(len(evicted), 0)
 
-    def test_remove_beyond_allocated_pages_is_defensive(self):
+    def test_rollback_insert_removes_never_written_chain(self):
+        """rollback_insert undoes an insert whose KV was never written."""
+        pool, radix = self._make_pool_and_radix(20)
+        tokens = list(range(1, 9))  # 8 tokens = 2 pages @ page_size 4
+        handle = pool.alloc(2)
+        radix.insert(tokens, handle)
+        self.assertEqual(pool.free_count(), 18)
+
+        radix.rollback_insert(tokens, handle)
+        # The whole chain is gone — no stale prefix to match.
+        self.assertEqual(radix.match_prefix(tokens), (0, []))
+        # And the request's exclusively-owned pages are returned.
+        self.assertEqual(pool.free_count(), 20)
+
+    def test_rollback_insert_preserves_shared_prefix(self):
+        """Rolling back one request must not disturb another's shared prefix."""
+        pool, radix = self._make_pool_and_radix(30)
+        # A caches [1..8] across pages p0,p1 (2 pages @ page_size 4).
+        h1 = pool.alloc(2)
+        radix.insert(list(range(1, 9)), h1)
+        self.assertEqual(pool.free_count(), 28)
+
+        # B shares A's prefix pages and extends by [9..12] on one own page.
+        matched, shared = radix.match_prefix(list(range(1, 13)))
+        self.assertEqual(matched, 8)
+        self.assertEqual(len(shared), 2)
+        h2 = pool.alloc(1)
+        h2.page_ids = shared + h2.page_ids
+        h2.num_shared = len(shared)
+        radix.insert(list(range(1, 13)), h2)
+        self.assertEqual(pool.free_count(), 27)
+
+        # A "fails its forward" -> roll back ONLY A's insert.
+        radix.rollback_insert(list(range(1, 9)), h1)
+
+        # B's shared prefix is untouched: still fully matched.
+        matched2, shared2 = radix.match_prefix(list(range(1, 13)))
+        self.assertEqual(matched2, 8)
+        self.assertEqual(shared2, shared)
+        # A's pages are shared with B, so they must NOT be freed (B still
+        # references them). Only B's own single page is held by the tree.
+        self.assertEqual(pool.free_count(), 27)
+        # A alone no longer matches its prompt as a *complete cached prefix*
+        # for a longer request... but B keeps it alive, so [1..8] as a prefix
+        # of a NEW request would still match (it is B's live shared prefix).
+        # The invariant that matters: B's data was not corrupted.
+        self.assertEqual(len(shared2), 2)
+
+    def test_rollback_insert_frees_own_pages_when_unshared(self):
+        """Rolling back an unshared insert fully releases its pages."""
+        pool, radix = self._make_pool_and_radix(30)
+        h = pool.alloc(2)
+        radix.insert(list(range(1, 9)), h)  # 8 tokens, 2 pages, no sharing
+        self.assertEqual(pool.free_count(), 28)
+
+        radix.rollback_insert(list(range(1, 9)), h)
+        self.assertEqual(pool.free_count(), 30)
+        self.assertEqual(radix.match_prefix(list(range(1, 9))), (0, []))
         """remove() over a handle too small for the sequence must not crash.
 
         Guard for the concurrent/abnormal case where a request's generated

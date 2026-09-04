@@ -105,6 +105,69 @@ class RadixCacheManager:
             node.ref_count += 1
             node.page_id = handle.page_ids[d // self.page_size]
 
+    def rollback_insert(self, input_ids: list[int], handle: BaseCacheHandle) -> None:
+        """Undo a recent ``insert`` for a request whose KV was never written.
+
+        Prefill attaches a request's prompt to the tree (one reference per node)
+        *before* the forward runs, because the KV is written during the forward.
+        If that forward fails (see Scheduler's error isolation), the prompt's KV
+        was never written — yet the nodes are left pointing at freshly allocated,
+        garbage (NaN) pages. A later request sharing that prefix would then
+        ``match_prefix`` onto those nodes and read garbage KV, silently
+        corrupting its output.
+
+        ``rollback_insert`` removes exactly the effect of the prior ``insert``:
+        decrements the references it claimed and detaches (leaf-upward) every
+        node it left unreferenced, so no node survives that points at a
+        never-written page. It frees only the pages of nodes that were actually
+        detached — never pages still shared with (referenced by) another live
+        request. Headroom pages the request allocated but that no tree node
+        ever referenced (insert tracks only prompt tokens) are freed from the
+        handle directly, since nothing else can reference them.
+        """
+        # Walk the inserted path (same as insert()): root -> each input token.
+        node = self.root
+        path: list[RadixNode] = []
+        for token_id in input_ids:
+            child = node.children.get(token_id)
+            if child is None:
+                break  # tree changed under us; nothing further to undo
+            path.append(child)
+            node = child
+
+        # Drop the references insert() claimed (top-down), then detach any node
+        # that is now unreferenced with no children, deepest first. insert()
+        # built this as a single chain, so once the leaf is detached its parent
+        # becomes a leaf and is handled on the next iteration — unless another
+        # request branched off or holds a reference, which keeps it alive.
+        for child in path:
+            child.ref_count -= 1
+        freed_pages: set[int] = set()
+        for child in reversed(path):
+            if child.ref_count <= 0 and not child.children:
+                if child.page_id >= 0:
+                    freed_pages.add(child.page_id)
+                del child.parent.children[child.token]
+            elif child.ref_count < 0:
+                child.ref_count = 0
+
+        # Pages owned by the detached nodes are now unreferenced: free them.
+        # Pages NOT detached (shared prefix still referenced by a live request)
+        # must not be freed. A node's page_id is its page-boundary owner's page;
+        # multiple consecutive tokens share one page, so collect a set.
+        if freed_pages:
+            self.pool.free_pages_by_id(list(freed_pages))
+
+        # Headroom pages beyond the prompt (allocated for future output, so no
+        # tree node references them) belong to this request alone and never got
+        # written — return them. Prompt pages [0, used) include shared ones and
+        # are handled above (detached -> freed, still-shared -> kept).
+        if handle is not None:
+            used = (len(input_ids) + self.page_size - 1) // self.page_size
+            extra = handle.page_ids[used:]
+            if extra:
+                self.pool.free_pages_by_id(extra)
+
     def remove(self, input_ids: list[int], handle: BaseCacheHandle) -> None:
         """Drop this request's references when it finishes. Never frees pages
         that hold token KV; those are owned by the tree and freed by ``evict``.

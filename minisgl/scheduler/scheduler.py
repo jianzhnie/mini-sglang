@@ -227,6 +227,7 @@ class Scheduler:
         batch: Batch | None,
         results: list[OutputToken],
         finished_reqs: list[Req],
+        rollback_reqs: list[Req],
     ) -> None:
         """Forward + sample one batch, isolating per-batch failures.
 
@@ -236,6 +237,12 @@ class Scheduler:
         this, one bad request would raise through ``step`` and the caller's
         event loop would either die or swallow the error, leaving every
         waiting request hung until timeout.
+
+        Requests are added to one of two cleanup lists on failure: a PREFILL
+        failure goes to ``rollback_reqs`` (its tree insert must be undone — see
+        ``PrefillManager.remove_failed_prefill_batch``), while a decode failure
+        goes to ``finished_reqs`` (its KV was written by the successful
+        prefill, so normal ``remove`` is correct).
         """
         if batch is None:
             return
@@ -251,7 +258,19 @@ class Scheduler:
             )
             for req in batch.reqs:
                 req.status = SequenceStatus.FINISHED
-                finished_reqs.append(req)
+                if batch.phase == "prefill":
+                    # The prompt was inserted into the radix tree before the
+                    # forward but its KV was never written (the crash happened
+                    # mid-forward). Routing this through remove() (which extends
+                    # the tree with the sequence) would leave garbage nodes that
+                    # later requests match — a silent output-corruption bug. It
+                    # must be rolled back instead.
+                    rollback_reqs.append(req)
+                else:
+                    # Decode: the KV for every token in req.input_ids was
+                    # written by the successful prefill; only this step's token
+                    # is missing (never appended). Normal remove() is correct.
+                    finished_reqs.append(req)
                 results.append(self._error_result(req.uid))
             return
         self._collect_results(batch, next_tokens, results, finished_reqs)
@@ -315,10 +334,13 @@ class Scheduler:
                 results.append(self._aborted.popleft())
 
         finished_reqs: list[Req] = []
+        rollback_reqs: list[Req] = []
 
         prefill_batch = self.prefill_manager.schedule_prefill()
         if prefill_batch is not None:
-            self._run_phase(prefill_batch, results, finished_reqs)
+            self._run_phase(
+                prefill_batch, results, finished_reqs, rollback_reqs
+            )
 
         # Requests aborted during scheduling never ran; report them as finished
         # so callers waiting on them stop waiting. `aborted` is mutated under
@@ -338,10 +360,14 @@ class Scheduler:
         if running:
             decode_batch = self.decode_manager.schedule_decode(running)
             if decode_batch is not None:
-                self._run_phase(decode_batch, results, finished_reqs)
+                self._run_phase(
+                    decode_batch, results, finished_reqs, rollback_reqs
+                )
 
         if finished_reqs:
             self.prefill_manager.remove_finished_batch(finished_reqs)
+        if rollback_reqs:
+            self.prefill_manager.remove_failed_prefill_batch(rollback_reqs)
 
         return results
 
