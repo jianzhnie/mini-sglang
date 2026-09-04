@@ -7,13 +7,9 @@ Usage:
 
 __all__ = ["main", "parse_args", "run_server", "run_shell"]
 import argparse
-import logging
 
-from minisgl.config import ModelArgs, ServerArgs
-from minisgl.engine.engine import Engine
+from minisgl.config import ServerArgs
 from minisgl.engine.llm import LLM
-from minisgl.scheduler.scheduler import Scheduler
-from minisgl.tokenizer import TokenizerWorker
 from minisgl.utils.logger import setup_logger
 
 
@@ -102,24 +98,9 @@ def parse_args() -> ServerArgs:
 
 def run_server(args: ServerArgs) -> None:
     """Launch the HTTP server with scheduler in background thread."""
-    import uvicorn
+    from minisgl.server.serve import serve
 
-    from minisgl.server.api import app, init_frontend
-
-    log_level = args.log_level
-    setup_logger(level=getattr(logging, log_level))
-
-    model_args = ModelArgs.from_pretrained(args.model_path)
-    tokenizer = TokenizerWorker(
-        args.model_path, trust_remote_code=args.trust_remote_code
-    )
-
-    engine = Engine(args, model_args, tp_rank=0)
-    scheduler = Scheduler(args, engine)
-
-    init_frontend(args, scheduler, tokenizer)
-
-    uvicorn.run(app, host=args.host, port=args.port, log_level=log_level.lower())
+    serve(args)
 
 
 def run_shell(args: ServerArgs) -> None:

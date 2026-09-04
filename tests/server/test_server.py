@@ -84,20 +84,26 @@ class TestFrontendManager(unittest.TestCase):
         fm.process_step()
 
     def test_stream_timeout_aborts_request(self):
-        import minisgl.server.api as api
         from minisgl.config import SamplingParams
+        from minisgl.server import streaming
 
         scheduler = self._MockScheduler()
         fm = self._make_frontend(scheduler)
 
-        old_frontend, old_timeout = api._frontend, api.REQUEST_TIMEOUT
-        api._frontend, api.REQUEST_TIMEOUT = fm, 0.01
-        try:
-            uid = fm.submit_request([1, 2, 3], SamplingParams())
-            result_queue = fm.get_result_queue(uid)
-            chunks = list(api._stream_chat_response(uid, result_queue, "m", 3))
-        finally:
-            api._frontend, api.REQUEST_TIMEOUT = old_frontend, old_timeout
+        uid = fm.submit_request([1, 2, 3], SamplingParams())
+        result_queue = fm.get_result_queue(uid)
+        chunks = list(
+            streaming.stream_response(
+                fm,
+                uid,
+                result_queue,
+                "chat",
+                "m",
+                3,
+                lambda content: streaming.content_chunk(uid, "m", "chat", content),
+                timeout=0.01,
+            )
+        )
 
         # Timed-out stream reports an error chunk instead of a silent [DONE],
         # aborts the scheduler-side request, and cleans up the result queue.
@@ -110,9 +116,9 @@ class TestFrontendManager(unittest.TestCase):
         a separate terminal chunk carries finish_reason + usage, then [DONE]."""
         import json
 
-        import minisgl.server.api as api
         from minisgl.config import SamplingParams
         from minisgl.scheduler.batch import OutputToken
+        from minisgl.server import streaming
 
         scheduler = self._MockScheduler()
         fm = self._make_frontend(scheduler)
@@ -122,23 +128,28 @@ class TestFrontendManager(unittest.TestCase):
                 return "".join(chr(i) for i in ids)
 
         fm.tokenizer = _FakeTokenizer()
-        old_frontend = api._frontend
-        api._frontend = fm
-        try:
-            uid = fm.submit_request([1, 2, 3], SamplingParams())
-            q = fm.get_result_queue(uid)
-            # Two content tokens, the last one finishing with reason "length".
-            scheduler.results.append(
-                OutputToken(uid=uid, token_id=101, finished=False, finish_reason=None)
-            )
-            scheduler.results.append(
-                OutputToken(uid=uid, token_id=102, finished=True, finish_reason="length")
-            )
-            fm.process_step()
+        uid = fm.submit_request([1, 2, 3], SamplingParams())
+        q = fm.get_result_queue(uid)
+        # Two content tokens, the last one finishing with reason "length".
+        scheduler.results.append(
+            OutputToken(uid=uid, token_id=101, finished=False, finish_reason=None)
+        )
+        scheduler.results.append(
+            OutputToken(uid=uid, token_id=102, finished=True, finish_reason="length")
+        )
+        fm.process_step()
 
-            chunks = list(api._stream_chat_response(uid, q, "model-x", prompt_tokens=3))
-        finally:
-            api._frontend = old_frontend
+        chunks = list(
+            streaming.stream_response(
+                fm,
+                uid,
+                q,
+                "chat",
+                "model-x",
+                3,
+                lambda content: streaming.content_chunk(uid, "model-x", "chat", content),
+            )
+        )
 
         self.assertEqual(chunks[-1], "data: [DONE]\n\n")
         payloads = [json.loads(c[len("data: "):]) for c in chunks[:-1]]

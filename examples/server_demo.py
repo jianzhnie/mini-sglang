@@ -29,7 +29,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 
 from _common import (  # noqa: E402
     banner,
-    build_engine,
     cli_main,
 )
 
@@ -74,22 +73,23 @@ def _stream_request(path: str, body: dict) -> None:
 
 def start_server(model_path: str) -> None:
     """Entry point of the spawned server subprocess."""
-    import logging
+    from minisgl.config import ServerArgs
+    from minisgl.server.serve import serve
 
-    import uvicorn
-
-    from minisgl.scheduler.scheduler import Scheduler
-    from minisgl.server.api import app, init_frontend
-    from minisgl.tokenizer import TokenizerWorker
-    from minisgl.utils.logger import setup_logger
-
-    setup_logger(level=logging.INFO)
-
-    args, engine = build_engine(model_path, host=HOST, port=PORT, max_running_req=4)
-    scheduler = Scheduler(args, engine)
-    tokenizer = TokenizerWorker(model_path)
-    init_frontend(args, scheduler, tokenizer)
-    uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
+    args = ServerArgs(
+        model_path=model_path,
+        host=HOST,
+        port=PORT,
+        tp_size=1,
+        attention_backend="fa",
+        max_running_req=4,
+        max_seq_len=256,
+        page_size=16,
+        memory_ratio=0.5,
+        cuda_graph_bs=0,
+        log_level="INFO",
+    )
+    serve(args)
 
 
 def main(model_path: str) -> None:
