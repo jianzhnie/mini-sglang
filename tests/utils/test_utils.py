@@ -163,6 +163,60 @@ class TestWeightLoading(unittest.TestCase):
         # Rank 1 gets the second half of the bias
         self.assertEqual(layer.bias.tolist(), [4.0, 5.0, 6.0, 7.0])
 
+    def test_load_hf_weights_safetensors_index(self):
+        """load_hf_weights follows model.safetensors.index.json shards."""
+        import json
+        import os
+        import tempfile
+
+        from minisgl.utils.weights import load_hf_weights
+
+        with tempfile.TemporaryDirectory() as tmp:
+            a = torch.randn(3, 3)
+            b = torch.randn(4, 4)
+            from safetensors.torch import save_file
+
+            save_file(
+                {"a.weight": a},
+                os.path.join(tmp, "model-00001-of-00002.safetensors"),
+            )
+            save_file(
+                {"b.weight": b},
+                os.path.join(tmp, "model-00002-of-00002.safetensors"),
+            )
+            with open(os.path.join(tmp, "model.safetensors.index.json"), "w") as f:
+                json.dump(
+                    {
+                        "weight_map": {
+                            "a.weight": "model-00001-of-00002.safetensors",
+                            "b.weight": "model-00002-of-00002.safetensors",
+                        }
+                    },
+                    f,
+                )
+
+            state = load_hf_weights(tmp)
+            self.assertEqual(set(state), {"a.weight", "b.weight"})
+            self.assertEqual(state["a.weight"].shape, (3, 3))
+            self.assertEqual(state["b.weight"].shape, (4, 4))
+
+    def test_load_hf_weights_plain_bin_dir_no_index(self):
+        """A dir of pytorch_model.bin files without an index is loaded."""
+        import tempfile
+        from pathlib import Path
+
+        from minisgl.utils.weights import load_hf_weights
+
+        with tempfile.TemporaryDirectory() as tmp:
+            torch.save({"x": torch.ones(2)}, str(Path(tmp) / "pytorch_model.bin"))
+            # A stray .safetensors next to it is also picked up.
+            from safetensors.torch import save_file
+
+            save_file({"y": torch.zeros(2)}, str(Path(tmp) / "extra.safetensors"))
+            state = load_hf_weights(tmp)
+            self.assertEqual(state["x"].tolist(), [1.0, 1.0])
+            self.assertEqual(state["y"].tolist(), [0.0, 0.0])
+
 
 # ── Test dtype resolution ──
 
@@ -250,6 +304,76 @@ class TestTokenizerWorker(unittest.TestCase):
         except Exception:
             self.skipTest("Model not available offline")
 
+    def _local_qwen3(self):
+        """A locally-cached Qwen3 tokenizer (skip if absent / no network)."""
+        from pathlib import Path
+
+        candidate = Path.home() / "hfhub" / "models" / "Qwen" / "Qwen3-0.6B"
+        if not (candidate / "tokenizer.json").exists():
+            candidate = Path.home() / ".cache" / "huggingface" / "hub" / "models--Qwen--Qwen3-0.6B"
+            if not (candidate / "snapshots").exists():
+                return None
+        return str(candidate)
+
+    @unittest.skipIf(
+        not __import__("importlib.util").util.find_spec("transformers"),
+        "transformers not installed",
+    )
+    def test_encode_decode_roundtrip(self):
+        """encode -> decode round-trips a real prompt without data loss."""
+        model_path = self._local_qwen3()
+        if not model_path:
+            self.skipTest("no local Qwen3 tokenizer; set one up offline")
+        from minisgl.tokenizer import TokenizerWorker
+
+        worker = TokenizerWorker(model_path)
+        text = "The capital of France is"
+        ids = worker.encode(text)
+        self.assertGreater(len(ids), 0)
+        # Round-trip must recover every word (BPE keeps subwords but the
+        # decoded text contains the original tokens in order).
+        decoded = worker.decode(ids)
+        for word in text.split():
+            self.assertIn(word.lower(), decoded.lower())
+
+        # decode() accepts both an int and a list[int].
+        self.assertEqual(worker.decode(ids[0]), worker.decode([ids[0]]))
+
+    @unittest.skipIf(
+        not __import__("importlib.util").util.find_spec("transformers"),
+        "transformers not installed",
+    )
+    def test_apply_chat_template_real_and_fallback(self):
+        model_path = self._local_qwen3()
+        if not model_path:
+            self.skipTest("no local Qwen3 tokenizer; set one up offline")
+        from minisgl.tokenizer import TokenizerWorker
+
+        worker = TokenizerWorker(model_path)
+        messages = [{"role": "user", "content": "Hello"}]
+        # Real template path (Qwen3 ships a chat template).
+        self.assertTrue(
+            worker.tokenizer.chat_template, "expected a real chat template"
+        )
+        rendered = worker.apply_chat_template(messages)
+        self.assertIn("Hello", rendered)
+        self.assertIn("user", rendered)
+
+        # Fallback path: a tokenizer without chat_template concatenates content.
+        class _NoTemplate:
+            chat_template = None
+
+            def apply_chat_template(self, *a, **kw):  # pragma: no cover
+                raise AssertionError("fallback must not call this")
+
+        worker.tokenizer = _NoTemplate()
+        self.assertEqual(
+            worker.apply_chat_template(
+                [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
+            ),
+            "a\n\nb",
+        )
+
 
 # ── Test Full Model (Dummy) ──
 
@@ -277,6 +401,11 @@ class TestSamplerEdgeCases(unittest.TestCase):
         from minisgl.config import SamplingParams
         from minisgl.sampling import Sampler
 
+        # temperature=0.01 is still *sampling* (not greedy): the argmax token
+        # wins with overwhelming probability but is not guaranteed. Seeding the
+        # draw keeps this deterministic regardless of RNG state left by earlier
+        # tests (it flaked on 4/50 seeds under the file's old ordering).
+        torch.manual_seed(0)
         sampler = Sampler()
         logits = torch.randn(4, 100)
         params = SamplingParams(temperature=0.01)
@@ -458,6 +587,62 @@ class TestCLIArgs(unittest.TestCase):
                 parse_args()
         finally:
             sys.argv = old_argv
+
+
+# ── Test Shell Loop (run_shell) ──
+class TestRunShell(unittest.TestCase):
+    """Drive the interactive shell loop without a real model."""
+
+    @staticmethod
+    def _run(inputs, llm):
+        import builtins
+        import io
+        import unittest.mock as mock
+        from contextlib import redirect_stdout
+
+        import minisgl.cli as cli
+
+        from minisgl.config import ServerArgs
+
+        real_llm = cli.LLM
+        cli.LLM = lambda **kw: llm
+        buf = io.StringIO()
+        supply = iter(inputs)
+
+        def fake_input(_prompt):
+            try:
+                return next(supply)
+            except StopIteration:
+                # Exhausting the canned inputs simulates EOF on stdin, which
+                # run_shell handles by exiting the loop.
+                raise EOFError from None
+
+        try:
+            with redirect_stdout(buf):
+                with mock.patch("builtins.input", side_effect=fake_input):
+                    cli.run_shell(ServerArgs(model_path="/tmp/model"))
+        finally:
+            cli.LLM = real_llm
+        return buf.getvalue()
+
+    def test_shell_quits_on_exit_command(self):
+        class _Llm:
+            def chat(self, messages, temperature, max_tokens):
+                return "hello back"
+
+        out = self._run(["hi", "quit"], _Llm())
+        self.assertIn("hello back", out)
+        self.assertIn("Goodbye!", out)
+
+    def test_shell_handles_eof_and_empty_lines(self):
+        class _Llm:
+            def chat(self, messages, temperature, max_tokens):
+                return "reply"
+
+        # Empty line is skipped (no LLM call); EOF ends the loop.
+        out = self._run(["", "hello"], _Llm())
+        self.assertIn("reply", out)
+        self.assertIn("Goodbye!", out)
 
 
 # ── Test Module Entry Point (python -m minisgl) ──

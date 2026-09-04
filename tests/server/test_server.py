@@ -152,6 +152,80 @@ class TestFrontendManager(unittest.TestCase):
         )
         fm.process_step()
 
+    def test_process_step_survives_scheduler_error(self):
+        """A scheduler step raising must not kill the event loop thread."""
+        import logging
+
+        from minisgl.config import SamplingParams
+        from minisgl.scheduler.batch import OutputToken
+
+        class _BoomScheduler(self._MockScheduler):
+            def step(self):
+                self.step_calls += 1
+                if self.step_calls == 1:
+                    raise RuntimeError("boom")
+                results, self.results = self.results, []
+                return results
+
+        scheduler = _BoomScheduler()
+        scheduler.step_calls = 0
+        fm = self._make_frontend(scheduler)
+        uid = fm.submit_request([1, 2, 3], SamplingParams())
+        scheduler.results.append(
+            OutputToken(uid=uid, token_id=7, finished=True, finish_reason="stop")
+        )
+
+        # First step blows up (logged, swallowed), second step distributes.
+        with self.assertLogs("minisgl", level=logging.ERROR):
+            fm.process_step()
+        fm.process_step()
+        self.assertEqual(fm.get_result_queue(uid).get_nowait(), (7, True, "stop"))
+
+    def test_run_event_loop_stops_and_distributes(self):
+        """run_event_loop polls until stop(); results still reach queues."""
+        import threading
+        import time
+
+        from minisgl.config import SamplingParams
+        from minisgl.scheduler.batch import OutputToken
+
+        scheduler = self._MockScheduler()
+        fm = self._make_frontend(scheduler)
+        uid = fm.submit_request([1, 2, 3], SamplingParams())
+
+        # Give the loop a couple of non-idle steps with results, then stop.
+        scheduler.results.append(
+            OutputToken(uid=uid, token_id=11, finished=False, finish_reason=None)
+        )
+        scheduler.results.append(
+            OutputToken(uid=uid, token_id=12, finished=True, finish_reason="length")
+        )
+        scheduler.idle_calls = 0
+        real_idle = scheduler.is_idle
+
+        def flaky_idle():
+            # Non-idle for the first ~3 polls so process_step runs, then idle.
+            scheduler.idle_calls += 1
+            return scheduler.idle_calls > 3
+
+        scheduler.is_idle = flaky_idle
+
+        fm.start()
+        try:
+            # Let the loop make progress, then stop it cleanly.
+            time.sleep(0.2)
+            fm.stop()
+            fm._thread.join(timeout=2.0)
+        finally:
+            fm._running = False
+            scheduler.is_idle = real_idle
+
+        q = fm.get_result_queue(uid)
+        # The two distributed tokens (11 then 12/length) reached the queue.
+        self.assertEqual(q.get_nowait(), (11, False, None))
+        self.assertEqual(q.get_nowait(), (12, True, "length"))
+        self.assertFalse(fm._thread.is_alive())
+
     def test_stream_timeout_aborts_request(self):
         from minisgl.config import SamplingParams
         from minisgl.server import streaming
