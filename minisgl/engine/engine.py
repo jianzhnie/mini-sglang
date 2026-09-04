@@ -51,6 +51,7 @@ class Engine:
         self._maybe_init_distributed(model_args)
         AttentionBackend.configure(server_args.attention_backend)
         self._clamp_max_seq_len(model_args)
+        self._validate_model_path(server_args.model_path)
 
         # --- Model assembly (delegated to model_runner for testability) ---
         model, model_type = model_runner.detect_and_create_model(
@@ -127,6 +128,30 @@ class Engine:
             )
             args.max_seq_len = max_pos
 
+    @staticmethod
+    def _validate_model_path(model_path: str) -> None:
+        """Fail fast with a clear message when the model dir is unusable.
+
+        Catches the common typo / un-downloaded case up front instead of an
+        opaque FileNotFoundError deep inside registry/config loading.
+        """
+        from pathlib import Path
+
+        p = Path(model_path)
+        if not p.exists():
+            raise FileNotFoundError(
+                f"Model path does not exist: {model_path!r}. "
+                "Pass a directory containing config.json."
+            )
+        if not p.is_dir():
+            raise NotADirectoryError(
+                f"Model path is not a directory: {model_path!r}."
+            )
+        if not (p / "config.json").is_file():
+            raise FileNotFoundError(
+                f"Model path has no config.json: {model_path!r}. "
+                "This does not look like a HuggingFace model directory."
+            )
 
     def __enter__(self) -> "Engine":
         return self
