@@ -329,8 +329,7 @@ class TestBaseAttentionHelpers(unittest.TestCase):
 
     def test_reshape_for_attention(self):
         attn = self._make_attn()
-        batch, seq, hidden = 2, 6, 128
-        x = torch.randn(batch, seq, hidden)
+        batch, seq = 2, 6
         q = torch.randn(batch, seq, attn.num_local_heads * attn.head_dim)
         k = torch.randn(batch, seq, attn.num_local_kv_heads * attn.head_dim)
         v = torch.randn(batch, seq, attn.num_local_kv_heads * attn.head_dim)

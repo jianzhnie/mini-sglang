@@ -12,12 +12,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 class _FakeScheduler:
-    """Replays a scripted sequence of (token_id, finished, reason) outputs."""
+    """Replays a scripted sequence of scheduler steps.
+
+    Each element of ``script`` is one step: a list of
+    ``(uid, token_id, finished, finish_reason)`` tuples returned by that step.
+    """
 
     def __init__(self, script):
-        self._script = list(script)
+        self._script = [list(step) for step in script]
         self._uid = 0
-        self.requests = []  # (input_ids, sampling_params)
+        self.requests = []  # (uid, input_ids, sampling_params)
 
     def add_request(self, input_ids, sampling_params):
         uid = self._uid
@@ -29,14 +33,12 @@ class _FakeScheduler:
         from minisgl.scheduler.batch import OutputToken
 
         if not self._script:
+            # Script exhausted: nothing more to emit.
             return []
-        # Each script entry is a list of (token_id, finished, reason) for one step.
-        batch = self._script.pop(0)
-        out = []
-        for i, (tok, finished, reason) in enumerate(batch):
-            uid = i if self._uid == 1 else i  # align uids 0..n-1 in order
-            out.append(OutputToken(uid=uid, token_id=tok, finished=finished, finish_reason=reason))
-        return out
+        return [
+            OutputToken(uid=uid, token_id=tok, finished=f, finish_reason=r)
+            for uid, tok, f, r in self._script.pop(0)
+        ]
 
     def is_idle(self):
         return not self._script
@@ -47,7 +49,6 @@ class _FakeTokenizer:
         self.template_calls = []
 
     def encode(self, text):
-        # Deterministic pseudo-tokenization for the tests.
         return [ord(c) for c in text if c != " "]
 
     def decode(self, token_ids, skip_special_tokens=True):
@@ -70,28 +71,29 @@ def _make_llm(scheduler_script):
 
 class TestLLMGenerate(unittest.TestCase):
     def test_single_prompt_returns_str(self):
-        # One request, produces tokens 65,66,67 then finishes.
+        # One request (uid 0) produces tokens 65, 66 across two steps then ends.
         llm = _make_llm([
-            [(65, False, None), (66, True, "length")],
+            [(0, 65, False, None)],
+            [(0, 66, True, "length")],
         ])
         out = llm.generate("Hello", max_tokens=2)
         self.assertIsInstance(out, str)
-        self.assertEqual(out, "AB")  # chr(65)+chr(66)
+        self.assertEqual(out, "AB")  # chr(65) + chr(66)
         self.assertEqual(len(llm.scheduler.requests), 1)
 
     def test_multiple_prompts_returns_list(self):
-        # Two requests interleaved in one step.
+        # Two requests (uid 0, 1) each produce one token and finish together.
         llm = _make_llm([
-            [(72, True, "length"), (73, True, "length")],  # H then I finish
+            [(0, 72, True, "length"), (1, 73, True, "length")],  # H then I
         ])
         out = llm.generate(["a", "b"], max_tokens=1)
         self.assertIsInstance(out, list)
         self.assertEqual(out, ["H", "I"])
 
     def test_aborted_request_yields_empty(self):
-        # A request aborted up front yields no tokens.
+        # A request aborted up front (before any token) yields empty output.
         llm = _make_llm([
-            [(0, True, "abort")],
+            [(0, 0, True, "abort")],
         ])
         out = llm.generate("x", max_tokens=5)
         self.assertEqual(out, "")
@@ -100,10 +102,11 @@ class TestLLMGenerate(unittest.TestCase):
         from minisgl.config import SamplingParams
 
         llm = _make_llm([
-            [(65, True, "length")],
+            [(0, 65, True, "length")],
         ])
         llm.generate("Hi", temperature=0.7, top_k=50, top_p=0.9, max_tokens=3)
-        _uid, _ids, params = llm.scheduler.requests[0]
+        uid, _ids, params = llm.scheduler.requests[0]
+        self.assertEqual(uid, 0)
         self.assertIsInstance(params, SamplingParams)
         self.assertEqual(params.temperature, 0.7)
         self.assertEqual(params.top_k, 50)
@@ -114,7 +117,7 @@ class TestLLMGenerate(unittest.TestCase):
 class TestLLMChat(unittest.TestCase):
     def test_single_messages_return_str(self):
         llm = _make_llm([
-            [(66, True, "length")],  # "B"
+            [(0, 66, True, "length")],  # "B"
         ])
         messages = [{"role": "user", "content": "hi"}]
         out = llm.chat(messages, max_tokens=1)
@@ -125,7 +128,7 @@ class TestLLMChat(unittest.TestCase):
 
     def test_multi_turn_returns_list(self):
         llm = _make_llm([
-            [(67, True, "length"), (68, True, "length")],  # C, D
+            [(0, 67, True, "length"), (1, 68, True, "length")],  # C, D
         ])
         conv1 = [{"role": "user", "content": "a"}]
         conv2 = [{"role": "user", "content": "b"}]
@@ -136,7 +139,7 @@ class TestLLMChat(unittest.TestCase):
 
 
 class TestLLMLifecycle(unittest.TestCase):
-    def test_context_manager_and_cleanup(self):
+    def test_cleanup_without_engine_is_safe(self):
         from minisgl.engine.llm import LLM
 
         # cleanup() must tolerate an unconstructed engine (e.g. failed init).

@@ -355,8 +355,6 @@ class TestLogger(unittest.TestCase):
             self.assertIn("hello file", log_file.read_text())
 
     def test_logger_writes_to_logging_capture(self):
-        import logging
-
         from minisgl.utils.logger import logger
 
         with self.assertLogs("minisgl", level="WARNING") as cm:
@@ -425,6 +423,15 @@ class TestCLIArgs(unittest.TestCase):
                 parse_args()
         finally:
             sys.argv = old_argv
+
+
+# ── Test Module Entry Point (python -m minisgl) ──
+class TestModuleEntry(unittest.TestCase):
+    def test_minisgl_cli_main_importable(self):
+        from minisgl.__main__ import main as entry_main
+        from minisgl.cli import main as cli_main
+
+        self.assertIs(entry_main, cli_main)
 
 
 if __name__ == "__main__":
