@@ -36,6 +36,15 @@ class DecodeManager:
             self.max_seq_len, dtype=torch.int32, device=self.device
         )
 
+        # Device-side cache of each page table. A request's page_ids only
+        # change at page boundaries / on eviction, so rebuilding the tensor
+        # every decode step is wasteful; key by page_ids content (a tuple) so
+        # reuse is always safe even if a handle object is recycled. Bounded to
+        # a few distinct tables (active requests rarely exceed this) so it
+        # cannot grow without limit over a long run.
+        self._pages_cache: dict[tuple[int, ...], torch.Tensor] = {}
+        self._pages_cache_max = 64
+
         self._input_ids_buf = torch.zeros(
             self.max_running_req, 1, dtype=torch.long, device=self.device
         )
@@ -108,9 +117,18 @@ class DecodeManager:
                 else:
                     self._write_loc_buf[i] = -1
 
-                pages = torch.tensor(
-                    handle.page_ids, dtype=torch.int32, device=self.device
-                )
+                # Reuse the device-side page-table tensor when this page list
+                # was seen before (page tables change only on alloc/evict).
+                key = tuple(handle.page_ids)
+                pages = self._pages_cache.get(key)
+                if pages is None:
+                    if len(self._pages_cache) >= self._pages_cache_max:
+                        # Drop one arbitrary entry to stay bounded.
+                        self._pages_cache.pop(next(iter(self._pages_cache)))
+                    pages = torch.tensor(
+                        key, dtype=torch.int32, device=self.device
+                    )
+                    self._pages_cache[key] = pages
                 n_blocks = min(len(handle.page_ids), self._max_blocks)
                 self._block_table_buf[i, :n_blocks] = pages[:n_blocks]
 

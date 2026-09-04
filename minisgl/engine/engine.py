@@ -13,63 +13,17 @@ if TYPE_CHECKING:
 __all__ = ["Engine"]
 import torch
 
-from minisgl.engine.batch_context import BatchContext
-from minisgl.engine.graph import GraphRunner
-from minisgl.engine.kvcache.pool import KVCachePool
+from minisgl.engine import model_runner
 from minisgl.models.attention.dispatcher import AttentionBackend
 from minisgl.models.attention.layer import BaseAttention
-from minisgl.models.layers.rope import RotaryEmbedding
 from minisgl.sampling import Sampler
 from minisgl.utils.device import (
     get_device,
     get_device_type,
     init_distributed,
-    mem_get_info,
     synchronize,
 )
 from minisgl.utils.logger import logger
-from minisgl.utils.weights import load_hf_weights, load_weights_parallel
-
-# Teaching simplification: on CPU there is no free-memory query, so the KV
-# pool is sized against this fixed budget instead of the accelerator heuristic
-# used on CUDA/NPU. 512 MB is enough to run the small (<=1B) models that are
-# practical on CPU without letting the pool dominate host RAM.
-_CPU_KV_CACHE_BYTES = 512 * 1024 * 1024  # 512 MB
-
-
-def _path_exists(path: str) -> bool:
-    from pathlib import Path
-
-    return Path(path).is_dir() and (Path(path) / "config.json").exists()
-
-
-def _resolve_dtype(dtype_str: str, model_path: str, device_type: str) -> torch.dtype:
-    """Resolve the target model dtype from the --dtype CLI value.
-
-    'auto' reads torch_dtype from the model's config.json (float32 fallback).
-    CPU only supports float32 reliably: anything else is forced to float32.
-    """
-    if dtype_str == "auto":
-        import json
-        from pathlib import Path
-
-        config_file = Path(model_path) / "config.json"
-        dtype_str = "float32"
-        if config_file.exists():
-            with config_file.open() as f:
-                dtype_str = json.load(f).get("torch_dtype", "float32")
-
-    dtype = getattr(torch, dtype_str, None)
-    if not isinstance(dtype, torch.dtype):
-        logger.warning("Unknown dtype %r; falling back to float32", dtype_str)
-        dtype = torch.float32
-
-    if device_type == "cpu" and dtype != torch.float32:
-        logger.warning(
-            "dtype %s is not fully supported on CPU; falling back to float32", dtype
-        )
-        dtype = torch.float32
-    return dtype
 
 
 class Engine:
@@ -94,73 +48,85 @@ class Engine:
         self.device = get_device()
         self._device_type = get_device_type()
 
-        if self.tp_size > 1:
-            init_distributed(tp_rank=tp_rank, tp_size=self.tp_size)
-            if model_args.num_kv_heads % self.tp_size != 0:
-                # Teaching simplification: KV heads are not truly divisible,
-                # so ranks replicate heads (max(1, ...) in each attention
-                # module and the KV pool) instead of erroring out.
-                logger.warning(
-                    "num_kv_heads=%d not divisible by tp_size=%d; KV heads will "
-                    "be replicated across ranks (no exact sharding)",
-                    model_args.num_kv_heads,
-                    self.tp_size,
-                )
-
+        self._maybe_init_distributed(model_args)
         AttentionBackend.configure(server_args.attention_backend)
+        self._clamp_max_seq_len(model_args)
 
-        # Clamp max_seq_len to the model's trained context window. RoPE tables
-        # and the paged KV pool / req_to_token buffers are all sized off this
-        # value, so an oversized --max-seq-len would only surface later as an
-        # index error mid-generation. Engine is always built before the
-        # Scheduler (which shares server_args), so clamping here propagates
-        # everywhere.
-        max_pos = model_args.max_position_embeddings
-        if max_pos and server_args.max_seq_len > max_pos:
-            logger.warning(
-                "max_seq_len=%d exceeds the model's max_position_embeddings=%d; "
-                "clamping to %d",
-                server_args.max_seq_len,
-                max_pos,
-                max_pos,
-            )
-            server_args.max_seq_len = max_pos
-
-        self.model, self._model_type = self._create_model()
-        self.dtype = _resolve_dtype(
+        # --- Model assembly (delegated to model_runner for testability) ---
+        model, model_type = model_runner.detect_and_create_model(
+            server_args.model_path, model_args
+        )
+        self._model_type = model_type
+        self.dtype = model_runner.resolve_dtype(
             server_args.dtype, server_args.model_path, self.device.type
         )
-        self.model.to(device=self.device, dtype=self.dtype)
-        self.model.eval()
+        model.to(device=self.device, dtype=self.dtype)
+        model.eval()
         # No autograd during capture/replay (or any inference forward).
-        self.model.requires_grad_(False)
+        model.requires_grad_(False)
 
-        self._prebuild_rope()
-        self._load_weights()
+        model_runner.prebuild_rope(model, server_args.max_seq_len, self.device)
 
-        self.kv_cache_pool = self._allocate_kv_cache()
-        self._assign_kv_cache()
-
-        self.batch_context = BatchContext(
-            server_args.max_running_req,
-            server_args.max_seq_len,
-            server_args.page_size,
-            self.device,
+        loaded = model_runner.load_model_weights(
+            model, server_args.model_path, self.tp_rank, self.tp_size
         )
+        logger.info("Loaded %d weights (model_type=%s)", loaded, self._model_type)
+
+        # --- KV cache allocation (delegated to KVCacheAllocator) ---
+        from minisgl.engine.kvcache.allocator import KVCacheAllocator
+
+        allocator = KVCacheAllocator(server_args, model_args)
+        self.kv_cache_pool = allocator.allocate(model, self.device, self.tp_size)
+
+        # --- Execution + sampling (delegated to ModelRunner / Sampler) ---
+        self.runner = model_runner.ModelRunner(model, server_args, self.device)
+        self.model = model  # public alias kept for tests / GraphRunner coupling
+        self.batch_context = self.runner.batch_context
+        self.graph_runner = self.runner.graph_runner
 
         self.sampler = Sampler()
-
-        self.graph_runner: GraphRunner | None = None
-        if (
-            server_args.cuda_graph_bs
-            and server_args.cuda_graph_bs > 0
-            and self.device.type in ("cuda", "npu")
-        ):
-            self.graph_runner = GraphRunner(self)
 
         logger.info(
             "Engine initialized on rank %d (device=%s)", tp_rank, self._device_type
         )
+
+    def _maybe_init_distributed(self, model_args: ModelArgs) -> None:
+        """Initialize the process group when tensor parallelism is requested."""
+        if self.tp_size <= 1:
+            return
+        init_distributed(tp_rank=self.tp_rank, tp_size=self.tp_size)
+        if model_args.num_kv_heads % self.tp_size != 0:
+            # Teaching simplification: KV heads are not truly divisible, so
+            # ranks replicate heads (max(1, ...) in each attention module and
+            # the KV pool) instead of erroring out.
+            logger.warning(
+                "num_kv_heads=%d not divisible by tp_size=%d; KV heads will "
+                "be replicated across ranks (no exact sharding)",
+                model_args.num_kv_heads,
+                self.tp_size,
+            )
+
+    def _clamp_max_seq_len(self, model_args: ModelArgs) -> None:
+        """Clamp max_seq_len to the model's trained context window.
+
+        RoPE tables and the paged KV pool / req_to_token buffers are all sized
+        off this value, so an oversized --max-seq-len would only surface later
+        as an index error mid-generation. Engine is always built before the
+        Scheduler (which shares server_args), so clamping here propagates
+        everywhere.
+        """
+        args = self.server_args
+        max_pos = model_args.max_position_embeddings
+        if max_pos and args.max_seq_len > max_pos:
+            logger.warning(
+                "max_seq_len=%d exceeds the model's max_position_embeddings=%d; "
+                "clamping to %d",
+                args.max_seq_len,
+                max_pos,
+                max_pos,
+            )
+            args.max_seq_len = max_pos
+
 
     def __enter__(self) -> "Engine":
         return self
@@ -189,120 +155,6 @@ class Engine:
         with contextlib.suppress(Exception):
             self.cleanup()
 
-    def _create_model(self) -> tuple[torch.nn.Module, str]:
-        """Create the model and return it together with its detected type."""
-        from minisgl.models.registry import create_model, detect_model_type
-
-        model_type = detect_model_type(self.server_args.model_path)
-        return create_model(self.model_args, model_type), model_type
-
-    def _prebuild_rope(self) -> None:
-        # Pre-build RoPE cos/sin tables on the compute device so per-layer
-        # forwards avoid host-device syncs and stay graph-capturable.
-        # RotaryEmbedding is not an nn.Module, so it never shows up in
-        # modules(); reach it via the attention modules' `rotary_emb` attr.
-        # prebuild() is idempotent, so per-layer instances are fine.
-        for module in self.model.modules():
-            rotary = getattr(module, "rotary_emb", None)
-            if isinstance(rotary, RotaryEmbedding):
-                rotary.prebuild(self.server_args.max_seq_len, self.device)
-
-    def _load_weights(self) -> None:
-        """Load HF weights from the model path, if it exists on disk."""
-        model_path = self.server_args.model_path
-        if not (model_path and _path_exists(model_path)):
-            return
-        state_dict = load_hf_weights(model_path)
-        model_type = self._model_type
-        # The Qwen3 family loads HF keys verbatim — no remapping needed.
-        loaded = load_weights_parallel(
-            self.model,
-            state_dict,
-            self.tp_rank,
-            self.tp_size,
-        )
-        logger.info("Loaded %d weights (model_type=%s)", loaded, model_type)
-        if hasattr(self.model, "tie_weights"):
-            self.model.tie_weights(state_dict)
-        # Fused-expert MoE models (e.g. Qwen3MoE) aggregate HF's
-        # per-expert weights (mlp.experts.{i}.*) into fused tensors
-        # themselves; load_weights_parallel cannot match those keys.
-        load_hf_experts = getattr(self.model, "load_hf_experts", None)
-        if load_hf_experts is not None:
-            n_expert = load_hf_experts(state_dict)
-            logger.info("Loaded %d fused expert weights", n_expert)
-
-    def _allocate_kv_cache(self) -> KVCachePool:
-        """Allocate KV cache based on available accelerator memory."""
-        args = self.server_args
-        ma = self.model_args
-
-        if self.device.type in ("cuda", "npu"):
-            free_mem, total_mem = mem_get_info(self.device)
-            used_mem = total_mem - free_mem
-            available_mem = int(total_mem * args.memory_ratio - used_mem)
-            if available_mem <= 0:
-                # The model already fills the budget (memory_ratio over-used).
-                # Silently allocating a 1-page pool turns every later request
-                # into "needs more pages than the pool" aborts — fail loudly
-                # instead so the operator can raise memory_ratio or use a
-                # smaller model.
-                logger.error(
-                    "No memory left for KV cache: total=%d used=%d (ratio=%.2f). "
-                    "Lower the model size or free GPU memory.",
-                    total_mem,
-                    used_mem,
-                    args.memory_ratio,
-                )
-                raise RuntimeError("KV cache allocation failed: no free memory")
-        else:
-            available_mem = _CPU_KV_CACHE_BYTES
-
-        dtype_itemsize = self.model.lm_head.weight.dtype.itemsize
-        # Match the attention modules: replicate KV heads when num_kv_heads
-        # is not divisible by tp_size (never allocate a 0-head buffer).
-        num_kv_heads_per_rank = max(1, ma.num_kv_heads // self.tp_size)
-        bytes_per_page = (
-            2
-            * ma.num_layers
-            * args.page_size
-            * num_kv_heads_per_rank
-            * ma.head_dim
-            * dtype_itemsize
-        )
-
-        num_pages = max(1, available_mem // bytes_per_page)
-        max_pages_needed = args.max_running_req * max(
-            1,
-            args.max_seq_len // args.page_size + 1,
-        )
-        num_pages = min(num_pages, max_pages_needed)
-
-        logger.info("Allocating KV cache: %d pages", num_pages)
-        return KVCachePool(
-            num_layers=ma.num_layers,
-            num_pages=num_pages,
-            page_size=args.page_size,
-            num_kv_heads=num_kv_heads_per_rank,
-            head_dim=ma.head_dim,
-            dtype=self.model.lm_head.weight.dtype,
-            device=self.device,
-        )
-
-    def _assign_kv_cache(self) -> None:
-        """Bind each attention layer to its slice of the paged KV cache pool.
-
-        The pool buffer is (num_layers, num_pages, page_size, num_kv_heads,
-        head_dim); modules() yields the layers' attention modules in layer
-        order, so layer i gets slice i.
-        """
-        k_all, v_all = self.kv_cache_pool.get_all_kv_cache()
-        layer_id = 0
-        for module in self.model.modules():
-            if isinstance(module, BaseAttention):
-                module.set_kv_cache(k_all[layer_id], v_all[layer_id])
-                layer_id += 1
-
     def _run_model(
         self,
         input_ids: torch.Tensor,
@@ -310,42 +162,14 @@ class Engine:
         attn_meta: AttentionMetadata | None = None,
         logits_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Single entry point for model forward.
-
-        The KV cache no longer travels through the call — each attention
-        layer holds its own slice (see _assign_kv_cache); only the per-batch
-        AttentionMetadata is passed in.
-        """
-        return self.model(
-            input_ids=input_ids,
-            positions=positions,
-            attn_meta=attn_meta,
-            logits_indices=logits_indices,
+        """Single forward entry (alias to ModelRunner, kept for GraphRunner)."""
+        return self.runner._run_model(
+            input_ids, positions, attn_meta, logits_indices
         )
 
     def forward(self, batch: Batch) -> torch.Tensor:
-        """Run model forward pass on a batch."""
-        if batch.phase == "prefill":
-            self.batch_context.prepare(batch)
-            with torch.inference_mode():
-                return self._run_model(
-                    batch.input_ids,
-                    batch.positions,
-                    batch.attn_meta,
-                    batch.logits_indices,
-                )
-
-        # Decode: try execution graph first, fall back to eager
-        if self.graph_runner is not None:
-            logits = self.graph_runner.replay(batch)
-            if logits is not None:
-                return logits
-        with torch.inference_mode():
-            return self._run_model(
-                batch.input_ids,
-                batch.positions,
-                batch.attn_meta,
-            )
+        """Run a model forward pass on a scheduler batch (via ModelRunner)."""
+        return self.runner.forward(batch)
 
     def sample(self, logits: torch.Tensor, batch: Batch) -> list[int]:
         """Sample next tokens from logits.
