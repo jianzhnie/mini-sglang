@@ -8,7 +8,7 @@
   <a href="README.md">English</a> | 中文
 </p>
 
-**Mini-SGLang** 是 [SGLang](https://github.com/sgl-project/sglang) 的轻量级教学实现，用 ~4,800 行 Python 完整复刻了一个高性能 LLM 推理框架的核心机制。项目拆解了现代 LLM 服务系统的每一个关键环节，让开发者能够逐行理解推理引擎的内部工作原理。
+**Mini-SGLang** 是 [SGLang](https://github.com/sgl-project/sglang) 的轻量级教学实现，用 ~5,100 行 Python 完整复刻了一个高性能 LLM 推理框架的核心机制。项目拆解了现代 LLM 服务系统的每一个关键环节，让开发者能够逐行理解推理引擎的内部工作原理。
 
 ## 核心特性
 
@@ -244,7 +244,7 @@ Mini-SGLang 支持 **Qwen3 系列**的稠密 decoder-only 模型。
 ## 运行测试
 
 ```bash
-# 单元测试（99 个测试，CPU 即可，~15s）——目录镜像 minisgl 包结构
+# 单元测试（CPU 即可，~15s）——目录镜像 minisgl 包结构
 python -m pytest tests
 # 或直接运行单个文件：
 python tests/scheduler/test_scheduler.py

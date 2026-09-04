@@ -8,7 +8,7 @@
   English | <a href="README.zh-CN.md">中文</a>
 </p>
 
-**Mini-SGLang** is a lightweight educational implementation of [SGLang](https://github.com/sgl-project/sglang), replicating the core mechanisms of a high-performance LLM inference framework in ~4,800 lines of Python. The project dissects every key component of a modern LLM serving system so developers can understand how an inference engine works, line by line.
+**Mini-SGLang** is a lightweight educational implementation of [SGLang](https://github.com/sgl-project/sglang), replicating the core mechanisms of a high-performance LLM inference framework in ~5,100 lines of Python. The project dissects every key component of a modern LLM serving system so developers can understand how an inference engine works, line by line.
 
 ## Features
 
@@ -245,7 +245,7 @@ Mini-SGLang supports the **Qwen3 family** of dense decoder-only transformers.
 ## Running Tests
 
 ```bash
-# Unit tests (99 tests, CPU-only, ~15s) — mirror the minisgl package layout
+# Unit tests (CPU-only, ~15s) — mirror the minisgl package layout
 python -m pytest tests
 # or run one file directly:
 python tests/scheduler/test_scheduler.py
