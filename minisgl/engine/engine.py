@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import contextlib
-from collections import defaultdict
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from minisgl.config import ModelArgs, ServerArgs
     from minisgl.models.attention.metadata import AttentionMetadata
-    from minisgl.scheduler.batch import Batch, Req
+    from minisgl.scheduler.batch import Batch
 
 __all__ = ["Engine"]
 import torch
@@ -32,7 +31,9 @@ from minisgl.utils.logger import logger
 from minisgl.utils.weights import load_hf_weights, load_weights_parallel
 
 # Teaching simplification: on CPU there is no free-memory query, so the KV
-# pool is sized against this fixed budget.
+# pool is sized against this fixed budget instead of the accelerator heuristic
+# used on CUDA/NPU. 512 MB is enough to run the small (<=1B) models that are
+# practical on CPU without letting the pool dominate host RAM.
 _CPU_KV_CACHE_BYTES = 512 * 1024 * 1024  # 512 MB
 
 
@@ -349,7 +350,8 @@ class Engine:
     def sample(self, logits: torch.Tensor, batch: Batch) -> list[int]:
         """Sample next tokens from logits.
 
-        Groups requests with identical sampling params for batched sampling.
+        Groups requests with identical sampling params for batched sampling
+        (see Sampler.sample_batch).
         """
         # Normalize to (num_reqs, vocab_size): decode may produce
         # (num_reqs, 1, vocab_size) or, for a single request, (vocab_size,).
@@ -360,31 +362,6 @@ class Engine:
             logits = logits.squeeze(1)  # (num_reqs, vocab_size)
         elif logits.dim() == 1:
             logits = logits.unsqueeze(0)  # (1, vocab_size)
-        return self._sample_batched(logits, batch.reqs)
 
-    def _sample_batched(self, logits: torch.Tensor, reqs: list[Req]) -> list[int]:
-        """Batch sample by grouping requests with identical sampling params.
-
-        Fast path: if all requests are greedy, skip grouping entirely.
-        """
-        if all(req.sampling_params.temperature <= 0.0 for req in reqs):
-            return logits.argmax(dim=-1).tolist()
-
-        groups: dict[tuple, list[int]] = defaultdict(list)
-        for i, req in enumerate(reqs):
-            key = (
-                req.sampling_params.temperature,
-                req.sampling_params.top_k,
-                req.sampling_params.top_p,
-            )
-            groups[key].append(i)
-
-        token_ids = [0] * len(reqs)
-        for indices in groups.values():
-            batch_logits = logits[indices]
-            params = reqs[indices[0]].sampling_params
-            tokens = self.sampler.sample(batch_logits, params).tolist()
-            for j, idx in enumerate(indices):
-                token_ids[idx] = tokens[j]
-
-        return token_ids
+        params = [req.sampling_params for req in batch.reqs]
+        return self.sampler.sample_batch(logits, params)

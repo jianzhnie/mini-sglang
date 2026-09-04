@@ -52,6 +52,41 @@ class TestSampler(unittest.TestCase):
         filtered = _apply_top_p(logits.clone(), 0.95)
         self.assertTrue((filtered > float("-inf")).sum().item() > 0)
 
+    def test_sample_batch_all_greedy(self):
+        from minisgl.config import SamplingParams
+        from minisgl.sampling import Sampler
+
+        torch.manual_seed(0)
+        sampler = Sampler()
+        logits = torch.randn(3, 100)
+        params = [SamplingParams(temperature=0.0)] * 3  # all greedy
+        tokens = sampler.sample_batch(logits, params)
+        self.assertEqual(len(tokens), 3)
+        self.assertEqual(tokens, logits.argmax(dim=-1).tolist())
+
+    def test_sample_batch_groups_identical_params(self):
+        from minisgl.config import SamplingParams
+        from minisgl.sampling import Sampler
+
+        torch.manual_seed(1)
+        sampler = Sampler()
+        logits = torch.randn(4, 100)
+        # Two greedy, two stochastic (sharing params -> sampled together).
+        params = [
+            SamplingParams(temperature=0.0),
+            SamplingParams(temperature=0.9, top_k=20),
+            SamplingParams(temperature=0.9, top_k=20),
+            SamplingParams(temperature=0.0),
+        ]
+        tokens = sampler.sample_batch(logits, params)
+        self.assertEqual(len(tokens), 4)
+        # Greedy rows pick argmax deterministically.
+        self.assertEqual(tokens[0], logits[0].argmax().item())
+        self.assertEqual(tokens[3], logits[3].argmax().item())
+        # Non-greedy rows fall inside vocab range.
+        self.assertTrue(all(0 <= t < 100 for t in tokens))
+
+
 
 # ── Test KV Cache Pool ──
 
@@ -432,6 +467,41 @@ class TestModuleEntry(unittest.TestCase):
         from minisgl.cli import main as cli_main
 
         self.assertIs(entry_main, cli_main)
+
+
+# ── Test Lazy Package Exports ──
+class TestLazyExports(unittest.TestCase):
+    def test_public_api_resolves_lazily(self):
+        # from minisgl import LLM must work even though engine.llm is heavy.
+        from minisgl import LLM, SamplingParams, ServerArgs
+
+        self.assertTrue(callable(LLM))
+        self.assertEqual(SamplingParams.__name__, "SamplingParams")
+        self.assertEqual(ServerArgs.__name__, "ServerArgs")
+
+    def test_all_matches_lazy_export_keys(self):
+        # Guard the hand-maintained __all__/_LAZY_EXPORTS pair from drift.
+        import minisgl
+
+        self.assertEqual(set(minisgl.__all__), set(minisgl._LAZY_EXPORTS.keys()))
+
+    def test_lightweight_import_does_not_pull_torch(self):
+        # A fresh subprocess avoids cached modules from prior imports.
+        import subprocess
+        import sys
+
+        code = (
+            "import sys; import minisgl.utils.logger;"
+            "print('torch' in sys.modules)"
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).resolve().parents[2]),
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.strip(), "False")
 
 
 if __name__ == "__main__":

@@ -45,6 +45,38 @@ class Sampler:
         probs = F.softmax(logits, dim=-1)
         return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
+    def sample_batch(
+        self,
+        logits: torch.Tensor,  # (num_reqs, vocab_size)
+        params_list: list[SamplingParams],
+    ) -> list[int]:
+        """Sample one token per request, batching requests that share params.
+
+        Requests whose sampling params are identical are sampled together (one
+        kernel call); requests are otherwise independent. ``logits`` row ``i``
+        belongs to ``params_list[i]``.
+
+        Returns:
+            A list of ``len(params_list)`` token IDs.
+        """
+        # Fast path: all greedy -> one argmax over the whole batch.
+        if all(p.temperature <= 0.0 for p in params_list):
+            return logits.argmax(dim=-1).tolist()
+
+        # Group rows by identical (temperature, top_k, top_p) so each group is
+        # one batched sample call.
+        groups: dict[tuple, list[int]] = {}
+        for i, params in enumerate(params_list):
+            key = (params.temperature, params.top_k, params.top_p)
+            groups.setdefault(key, []).append(i)
+
+        token_ids = [0] * len(params_list)
+        for indices in groups.values():
+            sampled = self.sample(logits[indices], params_list[indices[0]]).tolist()
+            for j, idx in enumerate(indices):
+                token_ids[idx] = sampled[j]
+        return token_ids
+
 
 def _apply_top_k(logits: torch.Tensor, k: int) -> torch.Tensor:
     """Zero out all logits below the top-k threshold."""
