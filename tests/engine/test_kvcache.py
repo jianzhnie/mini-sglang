@@ -275,6 +275,34 @@ class TestRadixCacheEvictRemove(unittest.TestCase):
         evicted = radix.evict(1)
         self.assertEqual(len(evicted), 0)
 
+    def test_remove_beyond_allocated_pages_is_defensive(self):
+        """remove() over a handle too small for the sequence must not crash.
+
+        Guard for the concurrent/abnormal case where a request's generated
+        length exceeds the pages it was allocated (normally unreachable — the
+        scheduler allocates `upper` covering the full length). The out-of-range
+        suffix nodes get page_id -1, and eviction detaches them without freeing
+        any bogus page.
+        """
+        pool, radix = self._make_pool_and_radix(20)
+        tokens = list(range(1, 17))  # 16 tokens
+        handle = pool.alloc(2)  # only 2 pages x 4 tokens = 8 slots
+        radix.insert(tokens[:8], handle)  # only 8 tokens were cached/written
+
+        # remove() with the full 16-token sequence extends the tree past the
+        # allocated pages without raising (out-of-range nodes keep page_id -1).
+        radix.remove(tokens, handle)
+
+        # Eviction detaches the whole chain and frees only the two real pages
+        # — never a (-1) placeholder — and never crashes.
+        evicted = radix.evict(10)
+        self.assertEqual(sorted(evicted), sorted(handle.page_ids))
+        self.assertNotIn(-1, evicted)
+        self.assertEqual(pool.free_count(), 20)
+
+        # Fully detached: no stale prefix match afterwards.
+        self.assertEqual(radix.match_prefix(tokens), (0, []))
+
 
 # ── Test DecodeManager ──
 

@@ -57,6 +57,75 @@ class TestFrontendManager(unittest.TestCase):
         fm.remove_result(uid)
         self.assertIsNone(fm.get_result_queue(uid))
 
+    def test_abort_request_pushes_terminal_and_removes_queue(self):
+        from minisgl.config import SamplingParams
+
+        scheduler = self._MockScheduler()
+        fm = self._make_frontend(scheduler)
+        uid = fm.submit_request([1, 2, 3], SamplingParams())
+        q = fm.get_result_queue(uid)
+
+        # A consumer blocked on q.get() must wake immediately with a terminal
+        # (abort) tuple instead of waiting out its timeout.
+        self.assertTrue(fm.abort_request(uid))
+        self.assertEqual(q.get(timeout=1.0), (0, True, "abort"))
+        # The queue is removed so it cannot accumulate for a dead request.
+        self.assertIsNone(fm.get_result_queue(uid))
+        self.assertEqual(scheduler.aborted, [uid])
+        # Idempotent at the frontend layer: the queue is already gone, so a
+        # second abort (e.g. timeout racing a client disconnect) is a no-op —
+        # it must not crash, duplicate, or re-add the queue.
+        fm.abort_request(uid)
+        self.assertIsNone(fm.get_result_queue(uid))
+        self.assertEqual(q.get_nowait() if not q.empty() else None, None)
+
+    def test_abort_request_removes_queue_even_when_scheduler_unknown(self):
+        from minisgl.config import SamplingParams
+
+        class _RejectingScheduler(self._MockScheduler):
+            def abort_request(self, uid):
+                self.aborted.append(uid)
+                return False  # request already gone from the scheduler
+
+        scheduler = _RejectingScheduler()
+        fm = self._make_frontend(scheduler)
+        uid = fm.submit_request([1, 2, 3], SamplingParams())
+
+        # The queue is still removed even when the scheduler reports the
+        # request unknown, so a stale entry cannot leak.
+        self.assertFalse(fm.abort_request(uid))
+        self.assertIsNone(fm.get_result_queue(uid))
+
+    def test_stream_error_reason_yields_error_chunk(self):
+        import json
+
+        from minisgl.config import SamplingParams
+        from minisgl.server import streaming
+
+        class _CharTokenizer:
+            def decode(self, ids, skip_special_tokens=True):
+                return "".join(chr(i) for i in ids)
+
+        scheduler = self._MockScheduler()
+        fm = self._make_frontend(scheduler)
+        fm.tokenizer = _CharTokenizer()
+        uid = fm.submit_request([1, 2, 3], SamplingParams())
+        q = fm.get_result_queue(uid)
+        # Inject an "error" terminal directly (as Scheduler.step would after a
+        # failed forward): the stream must report it, not emit a finish chunk.
+        q.put((0, True, "error"))
+
+        chunks = list(
+            streaming.stream_response(
+                fm, uid, q, "chat", "m", 3,
+                lambda c: streaming.content_chunk(uid, "m", "chat", c),
+            )
+        )
+        self.assertTrue(any('"error"' in chunk for chunk in chunks))
+        # Cleaned up and closed out with [DONE].
+        self.assertEqual(chunks[-1], "data: [DONE]\n\n")
+        self.assertIsNone(fm.get_result_queue(uid))
+
     def test_process_step_distributes_results(self):
         from minisgl.config import SamplingParams
         from minisgl.scheduler.batch import OutputToken

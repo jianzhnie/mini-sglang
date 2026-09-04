@@ -122,7 +122,14 @@ class RadixCacheManager:
                 child = RadixNode(token_id)
                 child.parent = node
                 child.depth = node.depth + 1
-                child.page_id = handle.page_ids[d // self.page_size]
+                if d < len(handle.page_ids) * self.page_size:
+                    child.page_id = handle.page_ids[d // self.page_size]
+                # else: d lies past the pages this handle actually owns (its
+                # KV was never written anywhere). This is unreachable in the
+                # normal flow — the scheduler allocates `upper` covering
+                # len(input_ids) — but a concurrent abort / eviction can shrink
+                # the handle, so guard instead of indexing out of range. The
+                # node keeps page_id = -1 (no page); evict() skips freeing it.
                 node.children[token_id] = child
             else:
                 # This request's insert() added one reference to prompt nodes.
@@ -206,8 +213,14 @@ class RadixCacheManager:
             owner = chain[pos]
             for victim in chain[pos : pos + group]:
                 del victim.parent.children[victim.token]
-            self.pool.free_pages_by_id([owner.page_id])
-            freed.append(owner.page_id)
-            pages_freed += 1
+            if owner.page_id >= 0:
+                # A -1 owner is a node whose KV was never written anywhere
+                # (remove()'s out-of-range guard); there is no page to free.
+                self.pool.free_pages_by_id([owner.page_id])
+                freed.append(owner.page_id)
+                pages_freed += 1
+            # else: detach the dangling nodes but free no page for them. pos
+            # still advances, so any real pages deeper in the chain are freed
+            # on the next iteration.
             pos += group
         return pages_freed

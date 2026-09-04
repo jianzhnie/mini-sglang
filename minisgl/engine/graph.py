@@ -82,6 +82,11 @@ class GraphRunner:
         max_bs = min(args.cuda_graph_bs, args.max_running_req)
         batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
         batch_sizes = [bs for bs in batch_sizes if bs <= max_bs]
+        # Capture one graph at exactly max_bs too: replay() picks the smallest
+        # captured size >= the batch, so without this a full-capacity batch
+        # would find no graph and silently fall back to eager execution.
+        if batch_sizes and batch_sizes[-1] != max_bs:
+            batch_sizes.append(max_bs)
 
         # Reserve one trash page from the pool: padding rows of padded graph
         # batches write/read KV into this page instead of polluting real

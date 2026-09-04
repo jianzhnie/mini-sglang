@@ -126,6 +126,12 @@ def stream_response(
             if reason == "abort":
                 yield error_chunk("Request aborted by the scheduler")
                 break
+            if reason == "error":
+                # The request died mid-run (forward/sample failure). No usable
+                # token was produced for it; report and stop cleanly.
+                logger.error("Request %s failed during generation", uid)
+                yield error_chunk("Request failed during generation")
+                break
             completion_tokens += 1
             content = detok.add_token(token_id)
             if content:
@@ -139,11 +145,11 @@ def stream_response(
         logger.warning(
             "Streaming request %s timed out after %ss; aborting", uid, timeout
         )
-        frontend.scheduler.abort_request(uid)
+        frontend.abort_request(uid)
         yield error_chunk("Timed out waiting for the next token")
     except GeneratorExit:
         # Client disconnected; make sure the request does not run forever.
-        frontend.scheduler.abort_request(uid)
+        frontend.abort_request(uid)
         raise
     except Exception as exc:
         logger.warning("Streaming request %s failed: %s", uid, exc)

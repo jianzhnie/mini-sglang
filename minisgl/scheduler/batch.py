@@ -25,8 +25,10 @@ class OutputToken:
     uid: int
     token_id: int
     finished: bool
-    # None while in progress; "stop" / "length" / "abort" on the final token
-    # ("abort" means token_id is meaningless).
+    # None while in progress; on the final token one of:
+    #   "stop" / "length" / "abort" / "error"
+    # ("abort" / "error" mean token_id is meaningless: the request never
+    # produced a usable token — it was rejected up front or died mid-run).
     finish_reason: str | None = None
 
 

@@ -426,6 +426,125 @@ class TestEndToEndScheduler(unittest.TestCase):
         self.assertIsInstance(scheduler.eos_token_id, set)
         self.assertIn(2, scheduler.eos_token_id)
 
+    def test_decode_forward_error_isolates_batch(self):
+        """A forward/sample failure must kill only the offending requests.
+
+        Regression: without per-phase error isolation, one bad decode forward
+        would raise out of step() and (in the server) take down the whole
+        event loop, leaving every other request hung until timeout.
+        """
+        from minisgl.config import SamplingParams
+
+        scheduler = self._make_engine_scheduler()
+        uid1 = scheduler.add_request(
+            [1, 2, 3], SamplingParams(temperature=0.0, max_tokens=3)
+        )
+        uid2 = scheduler.add_request(
+            [4, 5, 6], SamplingParams(temperature=0.0, max_tokens=3)
+        )
+
+        real_forward = scheduler.engine.forward
+        decode_calls = {"n": 0}
+
+        def flaky_forward(batch):
+            if batch.phase == "decode":
+                decode_calls["n"] += 1
+                raise RuntimeError("simulated decode failure")
+            return real_forward(batch)
+
+        scheduler.engine.forward = flaky_forward
+        try:
+            results = scheduler.step()
+        finally:
+            scheduler.engine.forward = real_forward
+
+        # The two requests shared one decode batch; both must be surfaced as
+        # finished-with-error (not silently dropped, not re-queued forever).
+        error_uids = {
+            out.uid
+            for out in results
+            if out.finished and out.finish_reason == "error"
+        }
+        self.assertEqual(error_uids, {uid1, uid2})
+        self.assertGreaterEqual(decode_calls["n"], 1)
+        self.assertTrue(scheduler.is_idle())
+
+        # The scheduler must still accept and complete later requests.
+        uid3 = scheduler.add_request(
+            [7, 8, 9], SamplingParams(temperature=0.0, max_tokens=3)
+        )
+        final_reasons = {}
+        steps = 0
+        while not scheduler.is_idle() and steps < 100:
+            for out in scheduler.step():
+                if out.finished:
+                    final_reasons[out.uid] = out.finish_reason
+            steps += 1
+        self.assertIn(final_reasons.get(uid3), ("stop", "length"))
+        self.assertNotIn(uid3, error_uids)
+
+    def test_prefill_forward_error_isolates_batch(self):
+        """A prefill failure surfaces an error result and never starts decode."""
+        from minisgl.config import SamplingParams
+
+        scheduler = self._make_engine_scheduler()
+        uid = scheduler.add_request(
+            [1, 2, 3], SamplingParams(temperature=0.0, max_tokens=3)
+        )
+
+        real_forward = scheduler.engine.forward
+
+        def flaky_forward(batch):
+            if batch.phase == "prefill":
+                raise ValueError("simulated prefill failure")
+            return real_forward(batch)
+
+        scheduler.engine.forward = flaky_forward
+        try:
+            results = scheduler.step()
+        finally:
+            scheduler.engine.forward = real_forward
+
+        self.assertTrue(
+            any(
+                out.uid == uid
+                and out.finished
+                and out.finish_reason == "error"
+                for out in results
+            )
+        )
+        # Nothing left running: the errored request never reached decode.
+        self.assertTrue(scheduler.is_idle())
+
+    def test_sampling_error_isolates_batch(self):
+        """Failures in sample() are isolated the same way as forward()."""
+        from minisgl.config import SamplingParams
+
+        scheduler = self._make_engine_scheduler()
+        uid = scheduler.add_request(
+            [1, 2, 3], SamplingParams(temperature=0.0, max_tokens=3)
+        )
+
+        def flaky_sample(logits, batch):
+            raise RuntimeError("simulated sampling failure")
+
+        real_sample = scheduler.engine.sample
+        scheduler.engine.sample = flaky_sample
+        try:
+            results = scheduler.step()
+        finally:
+            scheduler.engine.sample = real_sample
+
+        self.assertTrue(
+            any(
+                out.uid == uid
+                and out.finished
+                and out.finish_reason == "error"
+                for out in results
+            )
+        )
+        self.assertTrue(scheduler.is_idle())
+
 
 # ── Test PyTorch Attention Decode Path ──
 

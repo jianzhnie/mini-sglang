@@ -118,8 +118,8 @@ class LLM:
             for out in step_results:
                 if out.uid in pending_uids:
                     idx = uid_to_idx[out.uid]
-                    # Aborted requests carry a meaningless token_id.
-                    if out.finish_reason != "abort":
+                    # Aborted / errored requests carry a meaningless token_id.
+                    if out.finish_reason not in ("abort", "error"):
                         output_ids[idx].append(out.token_id)
                     if out.finished:
                         pending_uids.discard(out.uid)

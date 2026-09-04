@@ -52,6 +52,28 @@ class FrontendManager:
         with self._lock:
             self._results.pop(uid, None)
 
+    def abort_request(self, uid: int) -> bool:
+        """Cancel a request and push a terminal ("abort") result to its queue.
+
+        Combines scheduler.abort_request() (drops the request's pages and
+        bookkeeping) with a terminal token on the request's result queue, so a
+        consumer blocked on queue.get() — e.g. _collect_all_tokens or the
+        streaming generator — wakes up immediately instead of waiting out its
+        timeout. Removing the queue under the same lock prevents it from
+        accumulating for requests that will never be consumed.
+
+        Returns True if the request was known to the scheduler, False if it was
+        already gone (idempotent).
+        """
+        with self._lock:
+            aborted = self.scheduler.abort_request(uid)
+            q = self._results.pop(uid, None)
+            if q is not None:
+                # (token_id, finished, finish_reason): token_id is meaningless
+                # for an abort (matches Scheduler's own abort outputs).
+                q.put((0, True, "abort"))
+            return aborted
+
     def process_step(self) -> None:
         """Run one scheduler step and distribute results."""
         try:

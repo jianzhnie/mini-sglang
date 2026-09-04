@@ -37,6 +37,10 @@ app = FastAPI(title="Mini-SGLang", version="0.1.0")
 REQUEST_TIMEOUT = 120.0
 
 
+class GenerationError(Exception):
+    """Internal: a request died mid-run (mapped to HTTP 500)."""
+
+
 # Global frontend manager set after initialization.
 _frontend: FrontendManager | None = None
 
@@ -73,6 +77,10 @@ async def _collect_all_tokens(
                 # token was ever produced; surface it as a client error rather
                 # than a misleading empty 200.
                 raise RuntimeError("Request aborted by the scheduler")
+            if reason == "error":
+                # The request died mid-run (forward/sample failure). No usable
+                # token was produced; distinguish from the 400 abort case.
+                raise GenerationError("Request failed during generation")
             token_ids.append(token_id)
             if finished:
                 finish_reason = reason
@@ -81,8 +89,10 @@ async def _collect_all_tokens(
     try:
         await asyncio.to_thread(_collect)
     except queue.Empty:
-        _frontend.scheduler.abort_request(uid)
+        _frontend.abort_request(uid)
         raise HTTPException(status_code=504, detail="Generation timed out") from None
+    except GenerationError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from None
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
     finally:
@@ -101,7 +111,7 @@ def _submit_or_503(input_ids: list[int], sampling_params: SamplingParams) -> int
         # The request was already aborted+cleaned up between submit and here
         # (scheduler thread ran ahead). Fail cleanly instead of crashing on a
         # None queue.
-        _frontend.scheduler.abort_request(uid)
+        _frontend.abort_request(uid)
         raise HTTPException(status_code=503, detail="Request already closed")
     return uid
 

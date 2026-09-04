@@ -148,10 +148,16 @@ class DecodeManager:
         batch.positions = self._positions_buf[:num_reqs]
         batch.attn_meta = AttentionMetadata(
             forward_mode="decode",
-            write_loc=self._write_loc_buf[:num_reqs].clone(),
+            # Views (no clone): the metadata object never outlives this step's
+            # forward/sample — the next schedule_decode() first fill_()s these
+            # buffers and then builds a fresh metadata object. A backend or
+            # GraphRunner.replay reads these rows during the current forward
+            # only, so aliasing the pre-allocated buffers is safe and skips two
+            # small per-step copies.
+            write_loc=self._write_loc_buf[:num_reqs],
             block_table=self._block_table_buf[:num_reqs],
             req_to_token=self._req_to_token_buf[:num_reqs],
-            cache_seqlens=self._cache_seqlens_buf[:num_reqs].clone(),
+            cache_seqlens=self._cache_seqlens_buf[:num_reqs],
             # Python int, so attention backends can size gathers without .item().
             max_seqlen=max_seqlen,
         )
