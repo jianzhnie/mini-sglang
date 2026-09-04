@@ -449,6 +449,40 @@ class TestEOSNormalization(unittest.TestCase):
         result = Scheduler._normalize_eos({"token_id": 2})
         self.assertEqual(result, {2})
 
+    def test_dict_eos_via_id_key(self):
+        from minisgl.scheduler.scheduler import Scheduler
+
+        result = Scheduler._normalize_eos({"id": 7})
+        self.assertEqual(result, {7})
+
+    def test_unparseable_returns_empty(self):
+        """None / empty dict / bad types yield an empty set, not a fake {0}."""
+        from minisgl.scheduler.scheduler import Scheduler
+
+        self.assertEqual(Scheduler._normalize_eos(None), set())
+        self.assertEqual(Scheduler._normalize_eos({}), set())
+        self.assertEqual(Scheduler._normalize_eos({"foo": 1}), set())
+        self.assertEqual(Scheduler._normalize_eos("x"), set())
+
+    def test_load_eos_token_falls_back_when_none(self):
+        # A scheduler with an unparseable config must still end up with {0}.
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from minisgl.config import ServerArgs
+        from minisgl.scheduler.scheduler import Scheduler
+
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "config.json").write_text(
+                json.dumps({"architectures": ["Qwen3ForCausalLM"], "eos_token_id": None})
+            )
+            # Build a bare scheduler object to call the private loader.
+            args = ServerArgs(model_path=d)
+            sched = object.__new__(Scheduler)
+            sched.args = args
+            self.assertEqual(sched._load_eos_token(), {0})
+
 
 # ── Test Sampling Edge Cases ──
 

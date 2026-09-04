@@ -173,28 +173,28 @@ class TestResolveDtype(unittest.TestCase):
         import tempfile
         from pathlib import Path
 
-        from minisgl.engine.engine import _resolve_dtype
+        from minisgl.engine.model_runner import resolve_dtype
 
         with tempfile.TemporaryDirectory() as d:
             Path(d, "config.json").write_text(json.dumps({"torch_dtype": "bfloat16"}))
-            self.assertEqual(_resolve_dtype("auto", d, "cuda"), torch.bfloat16)
+            self.assertEqual(resolve_dtype("auto", d, "cuda"), torch.bfloat16)
             # CPU falls back to float32
-            self.assertEqual(_resolve_dtype("auto", d, "cpu"), torch.float32)
+            self.assertEqual(resolve_dtype("auto", d, "cpu"), torch.float32)
 
     def test_explicit_and_fallbacks(self):
-        from minisgl.engine.engine import _resolve_dtype
+        from minisgl.engine.model_runner import resolve_dtype
 
         self.assertEqual(
-            _resolve_dtype("float16", "/nonexistent", "cuda"), torch.float16
+            resolve_dtype("float16", "/nonexistent", "cuda"), torch.float16
         )
         # Missing config.json under auto falls back to float32
-        self.assertEqual(_resolve_dtype("auto", "/nonexistent", "cuda"), torch.float32)
+        self.assertEqual(resolve_dtype("auto", "/nonexistent", "cuda"), torch.float32)
         # CPU forces float32
         self.assertEqual(
-            _resolve_dtype("float16", "/nonexistent", "cpu"), torch.float32
+            resolve_dtype("float16", "/nonexistent", "cpu"), torch.float32
         )
         # Unknown dtype string falls back to float32
-        self.assertEqual(_resolve_dtype("weird", "/nonexistent", "cuda"), torch.float32)
+        self.assertEqual(resolve_dtype("weird", "/nonexistent", "cuda"), torch.float32)
 
 
 # ── Test Config ──

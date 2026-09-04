@@ -201,8 +201,60 @@ class TestIncrementalDetokenizer(unittest.TestCase):
         self.assertEqual(pieces, ["h", "i"])
 
 
-# ── Test Finish Reason and Abort ──
+# ── Test SSE Frame Serialization ──
+class TestStreamingFrames(unittest.TestCase):
+    """Pure serialization of OpenAI-style SSE frames (streaming module)."""
 
+    def _parse(self, frame: str) -> dict:
+        import json
+
+        self.assertTrue(frame.startswith("data: "))
+        return json.loads(frame[len("data: "):])
+
+    def test_usage_block(self):
+        from minisgl.server.streaming import usage
+
+        self.assertEqual(usage(3, 7), {"prompt_tokens": 3, "completion_tokens": 7, "total_tokens": 10})
+
+    def test_error_chunk_shape(self):
+        from minisgl.server.streaming import error_chunk
+
+        payload = self._parse(error_chunk("boom"))
+        self.assertEqual(payload, {"error": {"message": "boom"}})
+
+    def test_chat_content_chunk(self):
+        from minisgl.server.streaming import content_chunk
+
+        payload = self._parse(content_chunk(1, "m", "chat", "Hello"))
+        self.assertEqual(payload["id"], "chatcmpl-1")
+        self.assertEqual(payload["object"], "chat.completion.chunk")
+        self.assertEqual(payload["choices"][0]["delta"], {"content": "Hello"})
+        self.assertIsNone(payload["choices"][0]["finish_reason"])
+        self.assertNotIn("usage", payload)
+        self.assertIn("created", payload)
+
+    def test_completion_content_chunk(self):
+        from minisgl.server.streaming import content_chunk
+
+        payload = self._parse(content_chunk(1, "m", "completion", "Hi"))
+        self.assertEqual(payload["id"], "cmpl-1")
+        self.assertEqual(payload["object"], "text_completion")
+        self.assertEqual(payload["choices"][0]["text"], "Hi")
+        self.assertIsNone(payload["choices"][0]["finish_reason"])
+
+    def test_finish_chunk_carries_reason_and_usage(self):
+        from minisgl.server.streaming import finish_chunk
+
+        for api in ("chat", "completion"):
+            payload = self._parse(finish_chunk(1, "m", api, "length", 3, 5))
+            choice = payload["choices"][0]
+            self.assertEqual(choice["finish_reason"], "length")
+            if api == "chat":
+                self.assertEqual(choice["delta"], {})
+            else:
+                self.assertEqual(choice["text"], "")
+            self.assertEqual(payload["usage"]["prompt_tokens"], 3)
+            self.assertEqual(payload["usage"]["completion_tokens"], 5)
 
 
 if __name__ == '__main__':

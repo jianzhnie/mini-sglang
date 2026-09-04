@@ -18,9 +18,28 @@ from minisgl.utils.logger import logger
 class Scheduler:
     """Coordinates the prefill/decode lifecycle for inference requests.
 
+    Data flow (one request)::
+
+        add_request()  ──► PrefillManager.pending
+                                  │  schedule_prefill()  (match radix prefix,
+                                  │   allocate KV pages, build prefill batch)
+                                  ▼
+                          Engine.forward(prefill) ─► sample ─► first token
+                                  │
+                                  ▼
+                          PrefillManager.running  ──► DecodeManager.schedule_decode()
+                                  │                 (one token per running request)
+                                  ▼
+                     step():  Engine.forward(decode) ─► sample ─► append_token
+                                  │
+              finished (EOS / max_tokens / max_seq_len) ──► remove_finished_batch()
+                                  │
+                                  ▼
+                       OutputToken(finished=True, finish_reason) returned to caller
+
     Two-phase scheduling:
-    1. Prefill: Process new requests' full prompts
-    2. Decode: Generate one token per running request
+    1. Prefill: Process new requests' full prompts.
+    2. Decode: Generate one token per running request.
 
     Cache strategy: radix (prefix-aware, default) or naive (simple LRU).
     """
@@ -82,22 +101,32 @@ class Scheduler:
             # not "could not determine".
             raw_eos = cfg.get("eos_token_id", 0 if fname == "config.json" else None)
 
-        if raw_eos is None:
+        eos = self._normalize_eos(raw_eos)
+        if not eos:
+            # raw_eos was unparseable or empty (e.g. a config dict without a
+            # usable token_id) — fall back instead of running with no EOS.
             logger.warning("Could not determine EOS token ID, using %s", 0)
             return {0}
-
-        return self._normalize_eos(raw_eos)
+        return eos
 
     @staticmethod
-    def _normalize_eos(raw_eos: int | list[int] | dict) -> set[int]:
-        """Convert various EOS formats to a set of int IDs."""
+    def _normalize_eos(raw_eos: int | list[int] | dict | None) -> set[int]:
+        """Convert various EOS formats to a set of int IDs.
+
+        Returns an empty set when the value cannot be parsed so the caller can
+        fall back to a default; never fabricates a token.
+        """
         if isinstance(raw_eos, int):
             return {raw_eos}
         if isinstance(raw_eos, list):
-            return {int(x) for x in raw_eos}
+            return {int(x) for x in raw_eos if x is not None}
         if isinstance(raw_eos, dict):
-            return {raw_eos.get("token_id", raw_eos.get("id", 0))}
-        return {0}
+            token_id = raw_eos.get("token_id", raw_eos.get("id"))
+            if isinstance(token_id, int):
+                return {token_id}
+            if isinstance(token_id, list):
+                return {int(x) for x in token_id if x is not None}
+        return set()
 
     def add_request(self, input_ids: list[int], sampling_params: SamplingParams) -> int:
         """Add a new request and return its UID."""
